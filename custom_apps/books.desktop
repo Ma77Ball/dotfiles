@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Books
+Exec=nautilus /home/matt/Books
+Icon=/home/matt/Icons/book.png
+Terminal=false
+Categories=Utility;
