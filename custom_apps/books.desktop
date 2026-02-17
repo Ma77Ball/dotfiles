@@ -2,6 +2,6 @@
 Type=Application
 Name=Books
 Exec=nautilus /home/matthew/Books
-Icon=/home/matthew/Icons/book.png
+Icon=/home/matthew/dotfiles/Icons/book.png
 Terminal=false
 Categories=Utility;
