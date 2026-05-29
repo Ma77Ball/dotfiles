@@ -20,8 +20,14 @@ return {
           "lua_ls",
           "pyright",
           "ruff", -- Python linting/formatting
+          "ts_ls", -- TypeScript / JavaScript
           "html",
-          "jdtls",
+          "jdtls", -- installed by Mason, but started/configured by nvim-jdtls (see ftplugin/java.lua)
+        },
+        -- jdtls needs special handling (per-project workspace, debug/test bundles, Java 21+
+        -- runtime), so let nvim-jdtls launch it instead of mason-lspconfig auto-enabling it.
+        automatic_enable = {
+          exclude = { "jdtls" },
         },
         handlers = {
           -- Default handler for installed servers
