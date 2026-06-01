@@ -13,6 +13,8 @@ return {
     keys = {
       -- Force filesystem source so you’re not accidentally in git_status/buffers
       { "<leader>pv", "<cmd>Neotree filesystem toggle reveal<CR>", desc = "Neo-tree filesystem" },
+      -- Git changes only: lists just the files with git edits (staged/unstaged/untracked)
+      { "<leader>pg", "<cmd>Neotree git_status toggle<CR>", desc = "Neo-tree git status" },
     },
 
     opts = function(_, opts)
@@ -42,6 +44,12 @@ return {
       -- ✅ Visible-nodes-only filter (persistent)
       m["f"] = "filter_on_submit"
       m["F"] = "clear_filter"
+
+      -- ✅ Expand / collapse the whole tree
+      m["Z"] = "expand_all_nodes"   -- expand every folder recursively
+      -- (little `z` = close_all_nodes is already a neo-tree default)
+      -- Expand just the folder under the cursor and its children:
+      m["E"] = "expand_all_subnodes"
 
       -- ✅ Open but keep Neo-tree focused
       m["<CR>"] = { "open", config = { keep_focus = true } }

@@ -1,14 +1,14 @@
--- Seamless window navigation: <C-h/j/k/l> moves between nvim splits, and when you
--- hit the edge it crosses straight into the adjacent wezterm pane (e.g. the Claude
--- pane) via `wezterm cli activate-pane-direction`. The reverse direction (jumping
--- from the Claude pane back into nvim) is handled on the wezterm side -- see
--- ~/.config/wezterm/wezterm.lua. Together they make the Claude split feel native.
+-- Seamless window navigation: <C-h/j/k/l> moves between nvim splits. Claude now
+-- runs as a native in-nvim terminal (see plugins/claude.lua), and the terminal is
+-- Ghostty -- which is not a CLI multiplexer -- so there are no external panes to
+-- cross into. Multiplexer integration is therefore disabled; these keys move
+-- between nvim splits only (the Claude window included, since it's a real split).
 return {
   {
     "mrjones2014/smart-splits.nvim",
     lazy = false,
     opts = {
-      multiplexer_integration = "wezterm",
+      multiplexer_integration = false,
     },
     keys = {
       { "<C-h>", function() require("smart-splits").move_cursor_left() end, desc = "Move to split/pane left" },

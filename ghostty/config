@@ -1,0 +1,58 @@
+# Open new terminals in the Projects folder instead of inheriting the
+# launcher's directory (which was landing in Projects/Texera_Bench).
+working-directory = /home/matthew/Projects
+
+# Ghostty config — matches the previous wezterm look.
+# Ghostty is a GTK4/libadwaita app, so GNOME draws its native title bar
+# (dark grey, circular buttons, rounded corners) automatically, and it runs
+# natively on Wayland — no XWayland lag with multiple Claude instances.
+
+# JetBrains Mono = wezterm's bundled default. Ghostty uses system fonts, so this
+# requires the `jetbrains-mono-fonts` package to be installed (see install.sh note).
+font-family = "JetBrains Mono"
+font-size = 13
+background-opacity = 0.9
+
+# No tab bar (also removes the new-tab "+" button).
+window-show-tab-bar = never
+
+# Let the shell set the window title (see ~/.bashrc.d/ghostty-title.sh, which
+# shows the git branch). Without this, Ghostty's own integration overrides the
+# title with the working directory.
+shell-integration-features = no-title
+
+# Disable the leftover WezTerm shell integration (/etc/profile.d/wezterm.sh),
+# which otherwise runs bash-preexec + OSC user-var hooks on every prompt. This
+# var is read before that script loads, so it bails out early.
+env = WEZTERM_SHELL_SKIP_ALL=1
+
+# Lighter title bar grey. window-titlebar-background only applies with
+# window-theme = ghostty; foreground keeps the title/icons readable.
+window-theme = ghostty
+window-titlebar-background = 424242
+window-titlebar-foreground = f8dcc0
+
+# AdventureTime color scheme (Ghostty has no built-in one, so defined by hand to
+# match wezterm's "AdventureTime").
+background = 1f1d45
+foreground = f8dcc0
+cursor-color = efbf38
+selection-background = 706b4e
+selection-foreground = f8dcc0
+
+palette = 0=#050404
+palette = 1=#bd0013
+palette = 2=#82d962
+palette = 3=#e7741e
+palette = 4=#0f4ac6
+palette = 5=#665993
+palette = 6=#70a598
+palette = 7=#f8dcc0
+palette = 8=#4e7cbf
+palette = 9=#fc5f5a
+palette = 10=#9eff6e
+palette = 11=#efc11a
+palette = 12=#1997c6
+palette = 13=#9b5953
+palette = 14=#c8faf4
+palette = 15=#f6f5fb
