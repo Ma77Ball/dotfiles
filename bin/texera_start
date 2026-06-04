@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+# start_app.sh — Texera launcher. Composable targets; pins builds/runs to JDK 17.
+#
+# Targets (start one or more at once):
+#   db        dev postgres (pgroonga) on :5432  — texera_db + texera_iceberg_catalog
+#   infra     minio + lakefs (file-service compose)
+#   obs       observability stack (VictoriaLogs/Metrics, Jaeger, Parca, OTel collector)
+#   app       sbt-built backend services + frontend, in a tmux session (live logs)
+#   app-be    backend services only (no frontend) — avoids the ng-serve file watcher
+#   dev       convenience = db + infra + app   (obs is separate, run `obs` on its own)
+#   debug     full debug pipeline: db + infra + backends + the Amber engine under JDWP
+#             on :5005, ready for :TexeraDebug in nvim (runs ./texera_debug)
+#   docker    single-node, everything in containers (bin/single-node)
+#   k8s       helm install into the current kube context (prod values)
+#
+# Usage:
+#   ./start_app.sh <target...>        start targets, e.g. `./start_app.sh obs` or `./start_app.sh db infra app`
+#   ./start_app.sh stop [target...]   stop targets (no target = stop db+infra+obs+app)
+#   ./start_app.sh rebuild [clean]    sbt [clean] dist on JDK 17, then unzip launchers
+#   ./start_app.sh free-ports         kill whatever is holding the app/frontend ports
+#   ./start_app.sh status             show what is up
+#   ./start_app.sh attach             attach to the app tmux logs (Ctrl-b n/p switch, Ctrl-b d detach)
+#   ./start_app.sh                    interactive: pick targets (space-separated)
+#
+# Texera requires JDK 17. This script auto-selects one (sdkman 17* candidate, or
+# $TEXERA_JAVA_HOME) for builds and service launches without changing your shell
+# default. Running on JDK 24+ breaks Hadoop/Iceberg (Subject.getSubject removed).
+
+set -uo pipefail
+
+c_grn=$'\033[32m'; c_red=$'\033[31m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_cyn=$'\033[36m'; c_off=$'\033[0m'
+say()  { echo "${c_cyn}==>${c_off} $*"; }
+ok()   { echo "  ${c_grn}✓${c_off} $*"; }
+warn() { echo "  ${c_yel}!${c_off} $*"; }
+die()  { echo "${c_red}error:${c_off} $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "$1 is required but was not found on PATH"; }
+
+# texera_start operates on the Texera checkout you're standing in: walk up from $PWD for
+# a dir with build.sbt + amber/. This lives in ~/.local/bin (not in any checkout), so it
+# keys off your cwd, not its own location.
+_find_root() {
+  local d="$PWD"
+  while [[ "$d" != / ]]; do
+    [[ -f "$d/build.sbt" && -d "$d/amber" ]] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+ROOT="$(_find_root)" || die "texera_start: not inside a Texera checkout (no build.sbt above $PWD). cd into texera / texera2 / texera3 first."
+
+# ---- topology --------------------------------------------------------------
+SESSION="texera-dev"
+INFRA_COMPOSE="$ROOT/file-service/src/main/resources/docker-compose.yml"   # minio + lakefs
+SINGLE_NODE="$ROOT/bin/single-node"                                        # observability lives here
+PG_CONTAINER="texera-dev-postgres"
+PG_IMAGE="groonga/pgroonga:4.0.1-debian-15"                                # texera_ddl.sql needs pgroonga
+OBS_SERVICES=(otel-collector victorialogs victoriametrics jaeger parca parca-agent)
+OBS_PROFILES="observability-collector,observability-logs,observability-metrics,observability-traces,observability-profiles"
+DEV_BACKENDS=(config-service access-control-service file-service
+              workflow-compiling-service computing-unit-managing-service
+              texera-web-application computing-unit-master)
+# host ports bound by the sbt-built services + frontend (admin connectors
+# included). Cleared by 'free-ports' and before 'app' starts so a crashed run
+# that orphaned a JVM/ng-serve doesn't wedge the next start with "address in use".
+# Docker-managed infra/db/obs ports are NOT here — those are stopped via compose.
+APP_PORTS=(8080 8081 8085 2552 8082 8888 9090 9091 9092 9094 9096 4200 1234 3000)
+# ports each launched service binds — FIRST is the liveness/health port, the
+# rest are also cleared when that service is (re)launched so an orphaned holder
+# can't wedge the rebind. computing-unit-master also binds 2552 (pekko remoting
+# seed) besides its 8085 HTTP port.
+declare -A SVC_PORTS=(
+  [config-service]="9094" [access-control-service]="9096" [file-service]="9092"
+  [workflow-compiling-service]="9090 9091" [computing-unit-managing-service]="8888 8082"
+  [texera-web-application]="8080 8081" [computing-unit-master]="8085 2552" [frontend]="4200"
+)
+
+# ---- JDK 17 selection ------------------------------------------------------
+JDK17=""
+find_jdk17() {
+  local c
+  if [[ -n "${TEXERA_JAVA_HOME:-}" && -x "$TEXERA_JAVA_HOME/bin/java" ]]; then JDK17="$TEXERA_JAVA_HOME"; return; fi
+  for c in "$HOME/.sdkman/candidates/java"/17*; do
+    [[ -x "$c/bin/java" ]] && { JDK17="$c"; return; }
+  done
+  if command -v java >/dev/null && java -version 2>&1 | grep -q 'version "17\.'; then JDK17="${JAVA_HOME:-}"; fi
+}
+require_jdk17() {
+  find_jdk17
+  if [[ -z "$JDK17" ]]; then
+    warn "no JDK 17 found (set TEXERA_JAVA_HOME or 'sdk install java 17...'). Texera will FAIL on JDK 24+"
+    return 1
+  fi
+  ok "using JDK 17: $JDK17"
+}
+# run a command under JDK 17 (no-op env if JDK17 is empty)
+with_jdk17() { if [[ -n "$JDK17" ]]; then JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" "$@"; else "$@"; fi; }
+
+# ---- helpers ---------------------------------------------------------------
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0 || return 1; }
+dc() { docker compose -f "$1" "${@:2}"; }
+launcher() { find "$ROOT" -maxdepth 5 -type f -path "*/target/*/bin/$1" ! -path '*/universal/*' -perm -u+x 2>/dev/null | sort | head -1; }
+have_container() { docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$1"; }
+running_container() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$1"; }
+
+# ---- port clearing ---------------------------------------------------------
+# pids LISTENing on a TCP port — prefer lsof, fall back to ss, then to nothing.
+pids_on_port() {
+  local p="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -t -iTCP:"$p" -sTCP:LISTEN 2>/dev/null
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnpH 2>/dev/null | grep -oE "[:*]$p [^,]*pid=[0-9]+" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+  fi
+}
+# SIGTERM the listener(s) on $1, escalate to SIGKILL if it doesn't release.
+free_port() {
+  local p="$1" pid procs="" found=0
+  for pid in $(pids_on_port "$p"); do
+    found=1; procs+="$pid($(ps -p "$pid" -o comm= 2>/dev/null)) "
+    kill "$pid" 2>/dev/null
+  done
+  [[ $found -eq 0 ]] && return 1
+  local i
+  for i in $(seq 1 10); do port_open "$p" || { ok "freed :$p — was $procs"; return 0; }; sleep 0.3; done
+  for pid in $(pids_on_port "$p"); do kill -9 "$pid" 2>/dev/null; done
+  sleep 0.3
+  port_open "$p" && { warn ":$p still in use after SIGKILL — was $procs"; return 0; } || ok "force-freed :$p — was $procs"
+}
+free_ports() {
+  command -v lsof >/dev/null 2>&1 || command -v ss >/dev/null 2>&1 || { warn "neither lsof nor ss found — cannot free ports"; return; }
+  say "clearing app ports"
+  local p any=0
+  for p in "${APP_PORTS[@]}"; do port_open "$p" && { free_port "$p"; any=1; }; done
+  [[ $any -eq 0 ]] && ok "all app ports already free (${APP_PORTS[*]})"
+}
+
+# ---- rebuild ---------------------------------------------------------------
+rebuild() {
+  need sbt; need unzip; require_jdk17 || die "rebuild needs JDK 17"
+  local mode="${1:-}"
+  local -a cmds=(); [[ -n "$mode" ]] && cmds+=("$mode"); cmds+=(dist)
+  say "sbt ${cmds[*]} (JDK 17) — this takes a few minutes…"
+  with_jdk17 sbt "${cmds[@]}" || die "sbt dist failed"
+  say "unzipping dist launchers"
+  local z
+  while IFS= read -r z; do unzip -oq "$z" -d "$(dirname "$z")/.."; ok "$(basename "$z")"; done \
+    < <(find "$ROOT" -maxdepth 6 -path '*/target/universal/*.zip' ! -path '*/common/*' ! -path '*/node_modules/*' 2>/dev/null | sort)
+  ok "rebuild complete"
+}
+ensure_built() {
+  local missing=() n
+  for n in "${DEV_BACKENDS[@]}"; do [[ -n "$(launcher "$n")" ]] || missing+=("$n"); done
+  [[ ${#missing[@]} -eq 0 ]] && return 0
+  warn "missing launchers: ${missing[*]} — building"
+  rebuild
+}
+
+# ---- db --------------------------------------------------------------------
+up_db() {
+  if port_open 5432; then ok "postgres already on :5432 — using it"; return; fi
+  need docker
+  if have_container "$PG_CONTAINER"; then docker start "$PG_CONTAINER" >/dev/null
+  else
+    say "starting dev postgres ($PG_IMAGE) on :5432 — init from sql/"
+    docker run -d --name "$PG_CONTAINER" \
+      -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+      -p 5432:5432 -v "$ROOT/sql:/docker-entrypoint-initdb.d:ro" \
+      -v texera-dev-pgdata:/var/lib/postgresql/data "$PG_IMAGE" >/dev/null
+  fi
+  printf "  waiting for postgres"; local i
+  for i in $(seq 1 30); do port_open 5432 && break; printf '.'; sleep 1; done; echo
+  port_open 5432 && ok "postgres up (:5432)" || warn "postgres did not open :5432 — docker logs $PG_CONTAINER"
+}
+down_db() {
+  if running_container "$PG_CONTAINER"; then docker stop "$PG_CONTAINER" >/dev/null && ok "dev postgres stopped (volume kept; 'docker rm $PG_CONTAINER' to reset)"
+  else ok "dev postgres not running"; fi
+}
+
+# ---- infra (minio + lakefs) ------------------------------------------------
+up_infra()   { need docker; say "minio + lakefs"; dc "$INFRA_COMPOSE" up -d && ok "minio :9000/:9001, lakefs :8000"; }
+down_infra() { need docker; dc "$INFRA_COMPOSE" down >/dev/null 2>&1 && ok "minio/lakefs down"; }
+
+# ---- observability ---------------------------------------------------------
+up_obs() {
+  need docker; say "observability stack"
+  ( cd "$SINGLE_NODE" && COMPOSE_PROFILES="$OBS_PROFILES" docker compose up -d "${OBS_SERVICES[@]}" ) \
+    && ok "logs :9428  metrics :8428  traces :16686  profiles :7070  otlp :4317"
+}
+down_obs() {
+  need docker
+  ( cd "$SINGLE_NODE" && COMPOSE_PROFILES="$OBS_PROFILES" docker compose stop "${OBS_SERVICES[@]}" >/dev/null 2>&1 ) && ok "observability stopped"
+}
+
+# ---- app (sbt services + frontend in tmux, on JDK 17) ----------------------
+ensure_session() { tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n _ "while :; do sleep 3600; done"; }
+win() { echo "${1//[^A-Za-z0-9_-]/_}"; }
+win_exists() { tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$(win "$1")"; }
+# A window counts as "alive" only if it exists AND its health port is listening.
+# The dist launchers are bash wrappers (java runs as a child), so the pane's
+# foreground command is always `bash` — pane_current_command can't tell live
+# from crashed. The bound port can: a crashed/exited service releases it.
+win_alive() {  # name  [healthport]
+  local name="$1" port="${2:-}"
+  win_exists "$name" || return 1
+  [[ -n "$port" ]] || return 0           # no port to probe — assume the window means alive
+  port_open "$port"
+}
+launch() {  # name  cwd  command  [ports...]   (first port is the health port)
+  local name="$1" cwd="$2" cmd="$3"; shift 3
+  local ports=("$@") w; w="$(win "$name")"
+  ensure_session
+  win_alive "$name" "${ports[0]:-}" && { ok "$name already running"; return; }
+  win_exists "$name" && tmux kill-window -t "$SESSION:$w" 2>/dev/null   # clear a dead/crashed window
+  local p; for p in "${ports[@]}"; do port_open "$p" && free_port "$p"; done  # clear orphans on all its ports
+  tmux new-window -t "$SESSION" -n "$w" \
+    "cd '$cwd' && $cmd; ec=\$?; echo; echo '[$name exited ('\$ec') — Ctrl-b & to close]'; read"
+  ok "started $name"
+}
+up_app() {
+  local with_frontend="${1:-yes}"   # pass 'no' to launch backend services only
+  need tmux; require_jdk17 || true
+  ensure_built
+  local java_env=""; [[ -n "$JDK17" ]] && java_env="JAVA_HOME='$JDK17'"
+  local pyenv=""; [[ -x "$ROOT/../venv312/bin/python" ]] && pyenv="UDF_PYTHON_PATH='$ROOT/../venv312/bin/python'"
+  # config-service/file-service/etc. resolve their dropwizard yaml as
+  # $TEXERA_HOME/<service>/src/main/resources/... (default "."). Launched from
+  # the service dir, an unset TEXERA_HOME doubles the path (.../config-service/./config-service/...)
+  # and the service dies "config not found". Pin it to the repo root.
+  local home_env="TEXERA_HOME='$ROOT'"
+  local n path
+  for n in "${DEV_BACKENDS[@]}"; do
+    path="$(launcher "$n")"
+    [[ -n "$path" ]] || { warn "no launcher for $n — skipping"; continue; }
+    launch "$n" "${path%/target/*}" "env $home_env $java_env $pyenv '$path'" ${SVC_PORTS[$n]:-}
+    sleep 1; [[ "$n" == config-service ]] && sleep 2
+  done
+  if [[ "$with_frontend" == yes && -f "$ROOT/frontend/package.json" ]]; then
+    need yarn; launch frontend "$ROOT/frontend" "yarn start" ${SVC_PORTS[frontend]}
+    echo; ok "app launched — frontend http://localhost:4200  web API http://localhost:8080"
+  else
+    echo; ok "backend launched — web API http://localhost:8080 (frontend not started)"
+  fi
+  echo "  logs: ./start_app.sh attach   stop: ./start_app.sh stop app"
+}
+down_app() { tmux kill-session -t "$SESSION" 2>/dev/null && ok "app services stopped" || ok "app not running"; }
+attach()   { tmux has-session -t "$SESSION" 2>/dev/null || die "no app session running"; tmux attach -t "$SESSION"; }
+
+# ---- docker single-node ----------------------------------------------------
+run_docker() {
+  need docker; say "single-node (all containers)"
+  [[ -x "$SINGLE_NODE/up.sh" ]] || die "bin/single-node/up.sh not found"
+  ( cd "$SINGLE_NODE" && ./up.sh -d ) || die "docker compose up failed"
+  ok "UI http://localhost:8080 (texera/texera). logs: cd bin/single-node && docker compose logs -f"
+}
+down_docker() { need docker; ( cd "$SINGLE_NODE" && docker compose down ) && ok "single-node down"; }
+
+# ---- kubernetes (helm, prod values) ----------------------------------------
+run_k8s() {
+  need helm; need kubectl; local chart="$ROOT/bin/k8s"
+  say "helm install (context: $(kubectl config current-context 2>/dev/null || echo '?'))"
+  helm dependency build "$chart" || die "helm dependency build failed"
+  helm upgrade --install texera "$chart" -f "$chart/values.yaml" || die "helm install failed"
+  ok "release 'texera' applied. watch: kubectl get pods -w"
+}
+down_k8s() { need helm; helm uninstall texera && ok "helm release 'texera' removed"; }
+
+# ---- status ----------------------------------------------------------------
+status() {
+  find_jdk17
+  say "Texera status"
+  echo "  JDK 17:     ${JDK17:-${c_red}none — getSubject will fail on 24+${c_off}}"
+  local c
+  printf "  db:         "; port_open 5432 && echo "${c_grn}:5432 reachable${c_off}" || echo "${c_dim}down${c_off}"
+  printf "  infra:      "; running_container texera-lakefs-minio && echo "${c_grn}up${c_off}" || echo "${c_dim}down${c_off}"
+  printf "  observ.:    "; running_container texera-victorialogs && echo "${c_grn}up${c_off}" || echo "${c_dim}down${c_off}"
+  printf "  app (tmux): "; tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -v '^_$' | paste -sd' ' - || echo "${c_dim}down${c_off}"
+  local p busy=()
+  for p in "${APP_PORTS[@]}"; do port_open "$p" && busy+=("$p"); done
+  printf "  app ports:  "; [[ ${#busy[@]} -eq 0 ]] && echo "${c_dim}all free${c_off}" || echo "${c_yel}in use: ${busy[*]}${c_off} (./start_app.sh free-ports)"
+}
+
+# ---- debug pipeline --------------------------------------------------------
+# `texera_start debug`: db + infra + backends, then relaunch the Amber engine under a
+# JDWP debugger on :5005 so you can attach (:TexeraDebug in nvim, or IntelliJ remote).
+run_debug() {
+  local port="${TEXERA_DEBUG_PORT:-5005}"
+  if [[ "${1:-}" == stop ]]; then
+    tmux kill-window -t "$SESSION:cum-debug" 2>/dev/null; down_app; return
+  fi
+  require_jdk17 || true
+  up_db; up_infra
+  # wait for lakeFS health BEFORE backends so file-service doesn't race it and crash
+  say "waiting for lakeFS health (:8000) before backends..."
+  local i
+  for i in $(seq 1 60); do
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8000/_health 2>/dev/null)" == 200 ]] && break
+    sleep 1
+  done
+  up_app no          # backend services, no frontend
+  say "waiting for backends to be healthy..."
+  for i in $(seq 1 90); do
+    local up=1 p
+    for p in 9094 9096 9092 9090 8888 8080; do port_open "$p" || { up=0; break; }; done
+    [[ "$up" == 1 ]] && break; sleep 2
+  done
+  local L; L="$(launcher computing-unit-master)"
+  [[ -n "$L" ]] || die "no computing-unit-master launcher (run: texera_start rebuild)"
+  say "relaunching the engine under the debugger (JDWP :$port)..."
+  local p
+  for p in 8085 2552 "$port"; do port_open "$p" && free_port "$p"; done
+  sleep 2
+  ensure_session
+  tmux new-window -t "$SESSION" -n cum-debug -c "$ROOT/amber" \
+    "env TEXERA_HOME='$ROOT' JAVA_HOME='$JDK17' '$L' -jvm-debug $port"
+  for i in $(seq 1 60); do port_open "$port" && break; sleep 1; done
+  echo
+  if port_open "$port"; then ok "engine running under the debugger - JDWP on localhost:$port"
+  else warn "engine not on :$port yet - watch it: texera_start attach (window cum-debug)"; fi
+  cat <<EOF
+
+Attach from nvim (current editor):
+  :luafile $ROOT/profiling/nvim_tuple_debug.lua   (sets breakpoints + dap configs)
+  :TexeraDebug                                      (attach + set breakpoints)
+Then set breakpoints (<leader>b) and Run a workflow (web UI, or profiling/tx_client.py).
+Stop the debug engine:  texera_start debug stop
+EOF
+}
+
+# ---- target dispatch -------------------------------------------------------
+start_target() {
+  case "$1" in
+    db)    up_db ;;
+    infra) up_infra ;;
+    obs|observability) up_obs ;;
+    app)   up_app yes ;;
+    app-be|backend) up_app no ;;
+    docker|single) run_docker ;;
+    k8s|kubernetes)  run_k8s ;;
+    *) die "unknown target: $1 (db|infra|obs|app|app-be|dev|debug|docker|k8s)" ;;
+  esac
+}
+stop_target() {
+  case "$1" in
+    db)    down_db ;;
+    infra) down_infra ;;
+    obs|observability) down_obs ;;
+    app|app-be|backend)   down_app ;;
+    docker|single) down_docker ;;
+    k8s|kubernetes)  down_k8s ;;
+    *) die "unknown target: $1" ;;
+  esac
+}
+# expand 'dev' and normalize order so dependencies come up first
+expand_targets() {
+  local t out=()
+  for t in "$@"; do
+    case "$t" in
+      dev)           out+=(db infra app) ;;   # obs is its own target now
+      backend)       out+=(app-be) ;;
+      observability) out+=(obs) ;;
+      single)        out+=(docker) ;;
+      kubernetes)    out+=(k8s) ;;
+      *)             out+=("$t") ;;
+    esac
+  done
+  # unique, in canonical order (app-be before app so backend-only wins if both given)
+  local order=(db infra obs app-be app docker k8s) o
+  for o in "${order[@]}"; do printf '%s\n' "${out[@]}" | grep -qx "$o" && echo "$o"; done
+}
+
+# ---- entrypoint ------------------------------------------------------------
+cmd="${1:-}"
+case "$cmd" in
+  ""|menu)
+    echo "${c_cyn}Texera launcher${c_off} — targets (space-separated, e.g. 'obs' or 'db infra app' or 'dev'):"
+    echo "  ${c_grn}db${c_off} postgres   ${c_grn}infra${c_off} minio+lakefs   ${c_grn}obs${c_off} observability   ${c_grn}app${c_off} services+frontend"
+    echo "  ${c_grn}app-be${c_off} backend only (no frontend)   ${c_grn}dev${c_off} = db+infra+app"
+    echo "  ${c_grn}debug${c_off} = full pipeline, engine under JDWP on :5005 (then :TexeraDebug in nvim)"
+    echo "  ${c_grn}docker${c_off} single-node    ${c_grn}k8s${c_off} helm"
+    read -rp "start> " line
+    [[ -n "${line:-}" ]] || die "nothing selected"
+    read -ra TGTS <<< "$line"
+    for t in $(expand_targets "${TGTS[@]}"); do start_target "$t"; done
+    ;;
+  stop|down)
+    shift
+    if [[ $# -eq 0 ]]; then set -- dev; fi   # default: tear down the local dev stack
+    # stop in reverse dependency order (app first, db last)
+    mapfile -t T < <(expand_targets "$@" | tac)
+    for t in "${T[@]}"; do stop_target "$t"; done
+    ;;
+  debug)   shift; run_debug "$@" ;;   # full debug pipeline (engine under JDWP on :5005)
+  rebuild) shift; rebuild "${1:-}" ;;
+  attach)  attach ;;
+  status)  status ;;
+  free-ports|free|clear-ports|clear) free_ports ;;
+  -h|--help|help) sed -n '2,30p' "$0" ;;
+  *)
+    # one or more start targets
+    for t in $(expand_targets "$@"); do start_target "$t"; done
+    ;;
+esac

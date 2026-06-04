@@ -7,6 +7,27 @@ return {
       "mason-org/mason-lspconfig.nvim",
     },
     config = function()
+      -- Neovim 0.11 ships with virtual_text OFF by default, so LSP diagnostics
+      -- (e.g. ts_ls's "'}' expected" syntax errors) only appear as a faint gutter
+      -- sign + underline -- easy to miss, and invisible when the error lands on a
+      -- blank line at EOF. Turn the inline message back on so these errors are
+      -- actually readable in the buffer.
+      vim.diagnostic.config({
+        virtual_text = {
+          spacing = 2,
+          prefix = "●",
+          source = "if_many",
+        },
+        signs = true,
+        underline = true,
+        update_in_insert = false, -- don't churn diagnostics on every keystroke
+        severity_sort = true,
+        float = {
+          border = "rounded",
+          source = true,
+        },
+      })
+
       require("mason").setup()
       local mason_lspconfig = require("mason-lspconfig")
       local lspconfig = require("lspconfig")

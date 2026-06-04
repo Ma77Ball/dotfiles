@@ -87,6 +87,24 @@ else
     echo "  dnf not found — install JetBrains Mono manually (package: jetbrains-mono-fonts)."
 fi
 
+echo "--- Installing bin commands ---"
+# Personal CLI commands in dotfiles/bin -> ~/.local/bin (already on PATH on Fedora).
+# Copied as real, self-contained files (not symlinked) so they don't depend on the repo.
+mkdir -p "$HOME/.local/bin"
+if [ -d "$DIR/bin" ]; then
+    for script in "$DIR"/bin/*; do
+        [ -f "$script" ] || continue
+        name="$(basename "$script")"
+        cp "$script" "$HOME/.local/bin/$name"
+        chmod +x "$HOME/.local/bin/$name"
+        echo "Installed $name to ~/.local/bin"
+    done
+fi
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) echo "  note: ~/.local/bin is not on your PATH; add it in your shell rc." ;;
+esac
+
 echo "--- Configuring Neovim ---"
 create_symlink "$DIR/nvim" "$HOME/.config/nvim"
 
