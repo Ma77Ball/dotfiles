@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# ghme — TUI dashboard of your GitHub PRs & issues (wraps `gh dash`)
+# Config: ~/.config/gh-dash/config.yml
+
+set -euo pipefail
+
+# Open links through a quiet wrapper. xdg-open (gio) and the browser print to
+# stdout/stderr, which gh-dash lets inherit the terminal — that text paints over
+# the TUI and leaves off-by-a-few-pixels duplicate rows. The wrapper discards
+# all output and detaches, so pressing `o` never touches the UI.
+export BROWSER="$HOME/.local/bin/ghme-browser"
+
+# Remember the directory ghme was launched from so the checkout keybinding can
+# operate on *this* clone instead of a hardcoded repoPaths mapping. gh-dash
+# inherits this env var and exposes it to the shell that runs the keybinding.
+export GHME_LAUNCH_DIR="$PWD"
+
+# --help / -h: show usage and the in-TUI keybindings, then exit.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+ghme — your GitHub dashboard (PRs & issues) in a terminal UI
+
+USAGE
+  ghme                  Launch the TUI
+  ghme review           Launch straight into "Needs My Review"
+  ghme update-all       Merge each open PR's base into it (like GitHub's "Update
+                        branch" button — a merge, not a rebase); reports conflicts
+  ghme repo             Scope the dashboard to the repo of the current directory
+  ghme search <query>   Cross-repo search of PRs and issues (no TUI)
+  ghme discussions [repo]  List GitHub Discussions (default: apache/texera)
+  ghme --help           Show this help
+  ghme --edit           Open the config in $EDITOR
+  ghme --cli            Print the same data with plain `gh search` (no TUI)
+
+WHAT IT SHOWS  (edit ~/.config/gh-dash/config.yml to change)
+  PRs tab     : My Pull Requests · Needs My Review · Assigned to Me · Involved
+                · Drafts · Recently Merged
+  Issues tab  : Assigned to Me · Created by Me · Mentioning Me
+
+KEYBINDINGS (inside the TUI)
+  s            switch between PRs and Issues views
+  Tab / Shift-Tab   next / previous section (the tabs across the top)
+  j / k  or  arrows move down / up in the list
+  h / l        move between sections (vim-style)
+  enter        open the item's detail / preview
+  /            search bar — filter/search within the current section
+  o            open the selected item in your browser
+  d            (on a PR) view the diff
+  c            comment on the selected item
+  x / X        close / reopen
+  a            (on a PR) mark as approved (review)
+  r            refresh the current section
+  q  or  ctrl-c  quit
+  ?            full help / all keybindings
+
+PREVIEW PANE (the comments/conversation live here)
+  p            toggle the preview pane open / closed
+  P            move the preview to the bottom vs. the right
+  ctrl-d / ctrl-u   scroll the preview down / up (reach the comments below the body)
+  [ / ]        switch preview tabs
+
+CUSTOM KEYS (defined in config.yml)
+  C  or  space check out the selected PR's branch into the dir ghme was launched
+               from, pulling it up to the latest remote commit when it can. If
+               your local branch has diverged (or the tree is dirty) it leaves it
+               untouched, checks out the local branch, and reports what's out of
+               sync (ahead/behind, differing files) so you can merge/rebase it in.
+  u            (built-in) update the selected PR's branch with its base — GitHub's
+               "Update branch" button, a merge commit, not a rebase. A PR that
+               conflicts shows a red glyph in the leftmost state column.
+  U            update ALL your open PR branches at once (same as `ghme update-all`);
+               prints an ok/conflict/failed line per PR.
+  v            view the conversation as readable, separated cards. For PRs this
+               adds a Reviews section (approved / changes-requested badges) and
+               an inline Code-review section grouped by file, threaded by reply,
+               each with a few lines of diff context.
+  y            copy the selected item's URL to the clipboard
+EOF
+  exit 0
+fi
+
+if [[ "${1:-}" == "--edit" ]]; then
+  exec "${EDITOR:-nano}" "$HOME/.config/gh-dash/config.yml"
+fi
+
+# gh dash has no flag to pick a section or repo, so these launch the TUI with a
+# generated temporary config (cleaned up on exit) passed via --config.
+launch_with_config() {
+  local cfg
+  cfg=$(mktemp --suffix=.gh-dash.yml)
+  trap 'rm -f "$cfg"' EXIT
+  cat >"$cfg"
+  exec gh dash --config "$cfg"
+}
+
+# Emit a gh-dash config, optionally scoped to a single repo ($1, "owner/name";
+# empty = no scoping). Rather than hardcode a section list (which drifts from
+# the user's real tabs), take the actual config.yml and append `repo:<repo>` to
+# every section filter — keeping ALL original tabs, layout, keybindings, and
+# defaults intact. Also inject a repoPaths entry so gh-dash's built-in checkout
+# and any {{.RepoPath}} lookup resolve to the folder ghme was launched from.
+GHME_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/gh-dash/config.yml"
+emit_repo_scoped_config() {
+  local repo="$1"
+  {
+    if [[ -r "$GHME_CONFIG_FILE" ]]; then
+      if [[ -n "$repo" ]]; then
+        awk -v repo="$repo" '
+          /^[[:space:]]*filters:[[:space:]]*/ && $0 !~ /repo:/ { print $0 " repo:" repo; next }
+          { print }
+        ' "$GHME_CONFIG_FILE"
+      else
+        cat "$GHME_CONFIG_FILE"
+      fi
+    else
+      # Fallback if the config file is missing: a minimal dashboard.
+      cat <<EOF
+prSections:
+  - title: My PRs
+    filters: is:open author:@me${repo:+ repo:$repo}
+  - title: Needs My Review
+    filters: is:open review-requested:@me${repo:+ repo:$repo}
+issuesSections:
+  - title: Assigned to Me
+    filters: is:open assignee:@me${repo:+ repo:$repo}
+defaults:
+  view: prs
+  preview: { open: true, width: 60, position: auto }
+EOF
+    fi
+    # repoPaths maps repo -> local clone so the built-in checkout / {{.RepoPath}}
+    # resolve to the launch folder. gh-dash REQUIRES an exact "owner/repo" key to
+    # map to a literal path (a wildcard key like "*/*" would have to map to a
+    # wildcard path, which can't point everything at one dir). So inject the
+    # exact key only — which is exactly the repo we're scoped to. config.yml
+    # itself defines no repoPaths, so there's no duplicate key.
+    if [[ -n "$repo" && -n "${GHME_LAUNCH_DIR:-}" ]]; then
+      printf '\nrepoPaths:\n  "%s": "%s"\n' "$repo" "$GHME_LAUNCH_DIR"
+    fi
+  }
+}
+
+# review: launch with "Needs My Review" as the only/first PR section.
+if [[ "${1:-}" == "review" ]]; then
+  launch_with_config <<'EOF'
+prSections:
+  - title: Needs My Review
+    filters: is:open review-requested:@me
+issuesSections:
+  - title: Assigned to Me
+    filters: is:open assignee:@me
+defaults:
+  view: prs
+  preview: { open: true, width: 60, position: auto }
+EOF
+fi
+
+# update-all: merge each open PR's base branch into it (the "Update branch"
+# button — a merge, never a rebase), reporting which branches now conflict.
+if [[ "${1:-}" == "update-all" ]]; then
+  echo "Updating every open PR you authored with its base branch (merge, no rebase)…"
+  echo
+  ok=0 conflict=0 fail=0
+  while IFS=$'\t' read -r repo num title; do
+    [[ -n "$repo" ]] || continue
+    printf '  %-40s #%-6s ' "$repo" "$num"
+    if out=$(gh pr update-branch "$num" --repo "$repo" 2>&1); then
+      echo "✓ updated"
+      ok=$((ok + 1))
+    elif grep -qiE 'conflict|not mergeable|merge conflict' <<<"$out"; then
+      echo "✗ CONFLICT — resolve manually"
+      conflict=$((conflict + 1))
+    elif grep -qi 'up.to.date\|no.*changes\|already' <<<"$out"; then
+      echo "· already up to date"
+      ok=$((ok + 1))
+    else
+      echo "! failed: $(head -1 <<<"$out")"
+      fail=$((fail + 1))
+    fi
+  done < <(gh search prs --author @me --state open --json number,repository,title \
+             --jq '.[] | "\(.repository.nameWithOwner)\t\(.number)\t\(.title)"')
+  echo
+  echo "Done: $ok ok, $conflict conflicting, $fail failed."
+  exit 0
+fi
+
+# repo: scope the dashboard to the repo of the current directory.
+if [[ "${1:-}" == "repo" ]]; then
+  if ! repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null); then
+    echo "ghme: current directory is not a GitHub repo." >&2
+    exit 1
+  fi
+  # Process substitution (not a pipe) so launch_with_config runs in THIS shell
+  # and its `exec` replaces ghme. A pipe would run it in a subshell, the exec
+  # would only replace the subshell, and ghme would fall through to the final
+  # `exec gh dash` below — opening a second dashboard underneath.
+  launch_with_config < <(emit_repo_scoped_config "$repo")
+fi
+
+# search: cross-repo search of PRs and issues, plain output.
+if [[ "${1:-}" == "search" ]]; then
+  shift
+  if [[ $# -eq 0 ]]; then
+    echo "usage: ghme search <query>" >&2
+    exit 1
+  fi
+  echo "### PRs matching: $*"
+  gh search prs "$@" --state open
+  echo
+  echo "### Issues matching: $*"
+  gh search issues "$@" --state open
+  exit 0
+fi
+
+# discussions: gh-dash can't show Discussions, so query GraphQL directly.
+if [[ "${1:-}" == "discussions" ]]; then
+  repo="${2:-apache/texera}"
+  owner="${repo%%/*}"
+  name="${repo##*/}"
+  gh api graphql -f owner="$owner" -f name="$name" -f query='
+    query($owner:String!, $name:String!) {
+      repository(owner:$owner, name:$name) {
+        discussions(first:30, orderBy:{field:UPDATED_AT, direction:DESC}) {
+          nodes { number title url comments { totalCount } category { name } }
+        }
+      }
+    }' --jq '.data.repository.discussions.nodes[]
+      | "#\(.number)  [\(.category.name)]  \(.title)  (\(.comments.totalCount) comments)\n    \(.url)"'
+  exit 0
+fi
+
+# Fallback path: plain CLI listing, no TUI.
+if [[ "${1:-}" == "--cli" ]]; then
+  echo "### PRs assigned to you"
+  gh search prs --assignee @me --state open
+  echo
+  echo "### PRs you authored"
+  gh search prs --author @me --state open
+  echo
+  echo "### PRs requesting your review"
+  gh search prs --review-requested @me --state open
+  echo
+  echo "### Issues assigned to you"
+  gh search issues --assignee @me --state open
+  exit 0
+fi
+
+if ! gh extension list 2>/dev/null | grep -q 'gh dash'; then
+  echo "gh-dash is not installed. Install it with:" >&2
+  echo "  gh extension install dlvhdr/gh-dash" >&2
+  exit 1
+fi
+
+# Plain `ghme` (no args): generate a config so we can (a) auto-scope to the
+# current repo when inside one, and (b) inject repoPaths so checkout lands in
+# the launch folder. Outside a repo, repo="" → unscoped, but repoPaths is still
+# injected. With args, pass through to gh dash unchanged.
+if [[ $# -eq 0 ]]; then
+  repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || repo=""
+  # Process substitution, not a pipe — see the note in the `repo` block above.
+  launch_with_config < <(emit_repo_scoped_config "$repo")
+fi
+
+exec gh dash "$@"

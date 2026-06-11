@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# ghme-checkout - check out a PR's branch into the clone ghme was launched from,
+# bringing it up to the latest remote commit when it can. Bound to both `C` and
+# the spacebar in ~/.config/gh-dash/config.yml.
+#
+# `gh pr checkout` fetches the PR head and fast-forwards the local branch to it,
+# i.e. it pulls the latest. When the local branch has diverged from the remote
+# (or the working tree is dirty) it refuses, so it never clobbers your work, and
+# exits non-zero. In THAT case we don't fail: we land you on the local branch as
+# it is and report how it differs from the remote, so you can merge/rebase it in
+# yourself when you're ready.
+#
+# Usage: ghme-checkout <pr-number> <head-ref-name>
+set -uo pipefail
+
+pr="${1:?usage: ghme-checkout <pr-number> <head-ref-name>}"
+head="${2:-}"
+dir="${GHME_LAUNCH_DIR:-$PWD}"
+
+cd "$dir" 2>/dev/null || { echo "ghme-checkout: can't enter '$dir'." >&2; exit 1; }
+
+# Set the terminal title to the checked-out branch (the old binding did this too;
+# ghme runs from outside the PR's repo, so the .git/HEAD title watcher never sees
+# this checkout, so set it directly here).
+set_title() { [[ -n "$head" ]] && printf '\033]0;%s\007' "$head"; }
+
+# gh-dash re-enters its full-screen UI the instant this command exits, repainting
+# over anything printed here, so pause to let the report be read first.
+pause() { printf '\nPress Enter to return to ghme '; read -r _ || true; }
+
+# Fast path: fetch + fast-forward to the latest remote commit, then check it out.
+# GH_PAGER=cat stops gh from piping into a pager inside gh-dash's command runner.
+if GH_PAGER=cat gh pr checkout "$pr"; then
+  set_title
+  exit 0
+fi
+
+# Fallback: gh couldn't bring the branch to the latest commit. Land on the local
+# branch and explain what's out of sync. Never report this as a hard error
+# (exit 0), or gh-dash shows a "Whoops, got an error" box instead of the report.
+echo
+echo "!  Couldn't pull the latest '$head'. Your local branch has diverged from the"
+echo "   remote, or the working tree is dirty, so ghme left it untouched."
+
+if ! git rev-parse --verify -q "refs/heads/$head" >/dev/null; then
+  echo "x  No local branch '$head' to fall back to. See the error above."
+  pause
+  exit 0
+fi
+
+if ! git checkout "$head" 2>/dev/null; then
+  echo
+  echo "x  Couldn't switch to '$head'. You likely have uncommitted changes. Commit or"
+  echo "   stash them, then try again. Current status:"
+  git status --short --branch | sed 's/^/     /'
+  pause
+  exit 0
+fi
+set_title
+
+# Show how the local branch differs from the remote tip: the commits you're
+# missing/ahead by, and the files that would be in play on a merge.
+git fetch -q origin "$head" 2>/dev/null || true
+remote="origin/$head"
+if git rev-parse --verify -q "$remote" >/dev/null; then
+  read -r behind ahead < <(git rev-list --left-right --count "$remote...HEAD" 2>/dev/null || echo "0 0")
+  echo
+  echo ">  Now on your LOCAL '$head': ${ahead:-0} ahead, ${behind:-0} behind $remote (NOT updated to latest)."
+  if [[ "${behind:-0}" -gt 0 || "${ahead:-0}" -gt 0 ]]; then
+    echo "   Files differing from $remote:"
+    git diff --name-only "$remote" HEAD | sed 's/^/     /'
+    echo
+    echo "   Bring the latest in when ready:   git merge $remote   (or: git rebase $remote)"
+  fi
+else
+  echo
+  echo ">  Now on your LOCAL '$head' (couldn't reach $remote to compare)."
+fi
+pause
+exit 0

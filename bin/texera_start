@@ -16,7 +16,7 @@
 # Usage:
 #   ./start_app.sh <target...>        start targets, e.g. `./start_app.sh obs` or `./start_app.sh db infra app`
 #   ./start_app.sh stop [target...]   stop targets (no target = stop db+infra+obs+app)
-#   ./start_app.sh rebuild [clean]    sbt [clean] dist on JDK 17, then unzip launchers
+#   ./start_app.sh rebuild [clean]    stop app, then clean sbt dist on JDK 17, unzip launchers (clean by default)
 #   ./start_app.sh free-ports         kill whatever is holding the app/frontend ports
 #   ./start_app.sh status             show what is up
 #   ./start_app.sh attach             attach to the app tmux logs (Ctrl-b n/p switch, Ctrl-b d detach)
@@ -95,6 +95,39 @@ require_jdk17() {
 # run a command under JDK 17 (no-op env if JDK17 is empty)
 with_jdk17() { if [[ -n "$JDK17" ]]; then JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" "$@"; else "$@"; fi; }
 
+# ---- Node 24 selection -----------------------------------------------------
+# The frontend needs Node >=24 (frontend/package.json "engines" + Angular 21);
+# the stock /usr/bin/node is often older. Like the JDK pin above, this picks a
+# Node 24 (TEXERA_NODE_HOME, then an nvm v24.*, then any nvm >=24, then the PATH
+# node if it already qualifies) for the frontend WITHOUT changing your shell.
+NODE24_BIN=""
+find_node24() {
+  local d v
+  if [[ -n "${TEXERA_NODE_HOME:-}" && -x "$TEXERA_NODE_HOME/bin/node" ]]; then NODE24_BIN="$TEXERA_NODE_HOME/bin"; return; fi
+  # prefer the highest v24.* from nvm (the LTS line the project targets)
+  for d in $(ls -d "$HOME/.nvm/versions/node"/v24.* 2>/dev/null | sort -V -r); do
+    [[ -x "$d/bin/node" ]] && { NODE24_BIN="$d/bin"; return; }
+  done
+  # the PATH node, if it's already >=24
+  if command -v node >/dev/null; then
+    v="$(node -v 2>/dev/null)"; v="${v#v}"; v="${v%%.*}"
+    if [[ "$v" =~ ^[0-9]+$ && "$v" -ge 24 ]]; then NODE24_BIN="$(dirname "$(command -v node)")"; return; fi
+  fi
+  # any other nvm node >=24 (e.g. v25)
+  for d in $(ls -d "$HOME/.nvm/versions/node"/v* 2>/dev/null | sort -V -r); do
+    v="$(basename "$d")"; v="${v#v}"; v="${v%%.*}"
+    [[ -x "$d/bin/node" && "$v" =~ ^[0-9]+$ && "$v" -ge 24 ]] && { NODE24_BIN="$d/bin"; return; }
+  done
+}
+require_node24() {
+  find_node24
+  if [[ -z "$NODE24_BIN" ]]; then
+    warn "no Node >=24 found (set TEXERA_NODE_HOME or 'nvm install 24'). The frontend (Angular 21) needs it; ng serve may hang or fail to bind :4200 on older Node."
+    return 1
+  fi
+  ok "using Node: $("$NODE24_BIN/node" -v) ($NODE24_BIN)"
+}
+
 # ---- helpers ---------------------------------------------------------------
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0 || return 1; }
 dc() { docker compose -f "$1" "${@:2}"; }
@@ -140,7 +173,13 @@ rebuild() {
   local mode="${1:-}"
   local -a cmds=(); [[ -n "$mode" ]] && cmds+=("$mode"); cmds+=(dist)
   say "sbt ${cmds[*]} (JDK 17) — this takes a few minutes…"
-  with_jdk17 sbt "${cmds[@]}" || die "sbt dist failed"
+  # betterproto prints its progress ("Writing __init__.py", ...) to stderr, which
+  # sbt's ProcessLogger tags as [error] even on a clean run. Relabel just those
+  # lines to [info] so a successful rebuild doesn't look like it failed. pipefail
+  # (set at top) preserves sbt's real exit status, so genuine failures still die.
+  with_jdk17 sbt "${cmds[@]}" 2>&1 \
+    | sed -uE 's/^\[error\] (Writing )/[info] \1/' \
+    || die "sbt dist failed"
   say "unzipping dist launchers"
   local z
   while IFS= read -r z; do unzip -oq "$z" -d "$(dirname "$z")/.."; ok "$(basename "$z")"; done \
@@ -235,7 +274,11 @@ up_app() {
     sleep 1; [[ "$n" == config-service ]] && sleep 2
   done
   if [[ "$with_frontend" == yes && -f "$ROOT/frontend/package.json" ]]; then
-    need yarn; launch frontend "$ROOT/frontend" "yarn start" ${SVC_PORTS[frontend]}
+    need yarn; require_node24 || true
+    # prepend the Node 24 bin to PATH for the frontend window so yarn/ng/npx
+    # resolve the right node. $PATH stays literal so it expands in that shell.
+    local node_env=""; [[ -n "$NODE24_BIN" ]] && node_env="PATH=$NODE24_BIN:\$PATH "
+    launch frontend "$ROOT/frontend" "${node_env}yarn start" ${SVC_PORTS[frontend]}
     echo; ok "app launched — frontend http://localhost:4200  web API http://localhost:8080"
   else
     echo; ok "backend launched — web API http://localhost:8080 (frontend not started)"
@@ -390,7 +433,7 @@ case "$cmd" in
     for t in "${T[@]}"; do stop_target "$t"; done
     ;;
   debug)   shift; run_debug "$@" ;;   # full debug pipeline (engine under JDWP on :5005)
-  rebuild) shift; rebuild "${1:-}" ;;
+  rebuild) shift; down_app; rebuild "${1:-clean}" ;;   # stop app first; clean build by default
   attach)  attach ;;
   status)  status ;;
   free-ports|free|clear-ports|clear) free_ports ;;

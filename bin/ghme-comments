@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+# ghme-comments — render a PR/issue conversation in a clean, human-readable layout.
+# Used by the `v` keybinding in ghme (gh-dash). Pages the output unless captured.
+#
+# For PRs this shows three sections the gh-dash preview pane can't lay out well:
+#   1. Reviews          — APPROVED / CHANGES_REQUESTED / commented, with a badge.
+#   2. Code review      — inline comments grouped by file, threaded by reply,
+#                         each with a few lines of diff context.
+#   3. Conversation     — the top-level issue comments.
+# Issues just show the description + conversation.
+#
+# Usage: ghme-comments pr|issue <number> <owner/repo>
+set -euo pipefail
+
+kind="${1:?usage: ghme-comments pr|issue <number> <owner/repo>}"
+number="${2:?missing number}"
+repo="${3:?missing owner/repo}"
+
+case "$kind" in
+  pr)    cmd=(gh pr view "$number" --repo "$repo") ;;
+  issue) cmd=(gh issue view "$number" --repo "$repo") ;;
+  *) echo "ghme-comments: first arg must be 'pr' or 'issue'" >&2; exit 2 ;;
+esac
+
+# Width: fit the terminal but never go painfully wide.
+cols=$(tput cols 2>/dev/null || echo 80)
+width=$(( cols > 100 ? 100 : cols ))
+(( width < 40 )) && width=40
+body_width=$(( width - 2 ))
+
+# ANSI helpers (disabled when not a TTY / NO_COLOR set).
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  bold=$'\033[1m'; dim=$'\033[2m'; cyan=$'\033[36m'; green=$'\033[32m'
+  yellow=$'\033[33m'; magenta=$'\033[35m'; red=$'\033[31m'; blue=$'\033[34m'
+  reset=$'\033[0m'
+else
+  bold=; dim=; cyan=; green=; yellow=; magenta=; red=; blue=; reset=
+fi
+
+now=$(date +%s)
+ago() { # ISO-8601 -> "3 days ago"
+  local ts diff
+  ts=$(date -d "$1" +%s 2>/dev/null) || { echo "$1"; return; }
+  diff=$(( now - ts ))
+  local n unit
+  if   (( diff < 60 ));      then echo "just now"; return
+  elif (( diff < 3600 ));    then n=$(( diff/60 ));    unit=min
+  elif (( diff < 86400 ));   then n=$(( diff/3600 ));  unit=hour
+  elif (( diff < 2592000 )); then n=$(( diff/86400 )); unit=day
+  else date -d "$1" '+%b %-d, %Y'; return
+  fi
+  (( n != 1 )) && unit="${unit}s"
+  echo "$n $unit ago"
+}
+
+rule() { printf '%s%s%s\n' "$dim" "$(printf '─%.0s' $(seq 1 "$width"))" "$reset"; }
+
+# A section heading: a bold bar + label, set off with a blank line above.
+section() { printf '\n%s%s▌ %s%s\n' "$bold" "$magenta" "$1" "$reset"; }
+
+# Print a body block: strip CRs, collapse blank runs, word-wrap, indent by $2.
+print_body() {
+  local pad="${2:-  }"
+  printf '%s' "$1" \
+    | tr -d '\r' \
+    | sed -e 's/[[:space:]]*$//' \
+    | cat -s \
+    | fold -s -w "$body_width" \
+    | awk -v p="$pad" '{ print p $0 }'   # awk guarantees a trailing newline
+}
+
+# Map a reactionGroups JSON array to "👍 2  ❤️ 1" (empty if none).
+reactions() {
+  jq -r '
+    def emoji: {THUMBS_UP:"👍",THUMBS_DOWN:"👎",LAUGH:"😄",HOORAY:"🎉",
+                CONFUSED:"😕",HEART:"❤️",ROCKET:"🚀",EYES:"👀"}[.] // "•";
+    [ .[] | select(.users.totalCount > 0) | "\(.content|emoji) \(.users.totalCount)" ]
+    | join("  ")' <<<"$1"
+}
+
+# Print one author header + body + reactions.
+#   card <login> <assoc> <when> <reactionsJSON> <body> [pad] [arrow]
+# pad indents the whole card (for threaded replies); arrow is a glyph printed
+# before @author (e.g. "↳ " for a reply).
+card() {
+  local login="$1" assoc="$2" when="$3" react="$4" body="$5" pad="${6:-}" arrow="${7:-}"
+  local badge="" relt; relt=$(ago "$when")
+  case "$assoc" in
+    OWNER|MEMBER|COLLABORATOR) badge="${green}${assoc}${reset}" ;;
+    CONTRIBUTOR)               badge="${yellow}${assoc}${reset}" ;;
+    AUTHOR)                    badge="${magenta}original post${reset}" ;;
+    NONE|"")                   badge="" ;;
+    *)                         badge="${dim}${assoc}${reset}" ;;
+  esac
+  printf '\n%s%s%s@%s%s' "$pad" "$arrow" "$bold$cyan" "$login" "$reset"
+  [[ -n "$badge" ]] && printf '  %s' "$badge"
+  printf '  %s%s%s\n\n' "$dim" "$relt" "$reset"
+  print_body "$body" "${pad}  "
+  local rsum; rsum=$(reactions "$react")
+  [[ -n "$rsum" ]] && printf '\n%s  %s%s%s\n' "$pad" "$dim" "$rsum" "$reset"
+}
+
+# Show a few lines of diff context (the tail of a review comment's diff_hunk),
+# colored like a diff, truncated to the terminal width, indented by $2.
+render_hunk() {
+  local hunk="$1" pad="${2:-  }"; local maxw=$(( width - ${#pad} - 2 ))
+  (( maxw < 20 )) && maxw=20
+  printf '%s' "$hunk" | tr -d '\r' | tail -n 4 | while IFS= read -r ln; do
+    ln=${ln:0:$maxw}
+    case "$ln" in
+      '@@'*) printf '%s%s│ %s%s\n' "$pad" "$dim" "$ln" "$reset" ;;
+      '+'*)  printf '%s%s│%s %s%s%s\n' "$pad" "$dim" "$reset" "$green" "$ln" "$reset" ;;
+      '-'*)  printf '%s%s│%s %s%s%s\n' "$pad" "$dim" "$reset" "$red" "$ln" "$reset" ;;
+      *)     printf '%s%s│ %s%s\n' "$pad" "$dim" "$ln" "$reset" ;;
+    esac
+  done
+}
+
+# One API round-trip for the body + top-level comments (+ reviews for PRs).
+if [[ "$kind" == pr ]]; then
+  fields="number,title,author,body,createdAt,state,comments,reviews"
+else
+  fields="number,title,author,body,createdAt,state,comments"
+fi
+meta=$("${cmd[@]}" --json "$fields" 2>/dev/null) || {
+  echo "ghme-comments: couldn't load $kind #$number from $repo" >&2; exit 1; }
+
+# Inline review comments (PRs only) — a separate REST endpoint. Compact JSON.
+inline='[]'
+if [[ "$kind" == pr ]]; then
+  inline=$(gh api "repos/$repo/pulls/$number/comments" --paginate 2>/dev/null) || inline='[]'
+  [[ -z "$inline" ]] && inline='[]'
+fi
+
+render_reviews() {
+  # Skip "COMMENTED" reviews whose body is empty — they're just containers for
+  # the inline comments rendered in the next section, so they'd be noise here.
+  local rows; rows=$(jq -r '
+    (.reviews // [])[]
+    | select((.state != "COMMENTED") or ((.body // "" | gsub("\\s";"")) != ""))
+    | [ .state, (.author.login // "ghost"), (.submittedAt // ""),
+        ((.body // "") | @base64),
+        ((.reactionGroups // []) | tojson | @base64) ] | @tsv' <<<"$meta")
+  [[ -z "$rows" ]] && return 0
+  section "Reviews"
+  local state login when body64 react64 body react badge rsum
+  while IFS=$'\t' read -r state login when body64 react64; do
+    body=$(base64 -d <<<"$body64"); react=$(base64 -d <<<"$react64")
+    case "$state" in
+      APPROVED)          badge="${green}✓ approved${reset}" ;;
+      CHANGES_REQUESTED) badge="${red}✗ changes requested${reset}" ;;
+      COMMENTED)         badge="${blue}commented${reset}" ;;
+      DISMISSED)         badge="${dim}dismissed${reset}" ;;
+      PENDING)           badge="${yellow}pending${reset}" ;;
+      *)                 badge="${dim}${state}${reset}" ;;
+    esac
+    printf '\n%s@%s%s  %s  %s%s%s\n' "$bold$cyan" "$login" "$reset" \
+      "$badge" "$dim" "$(ago "$when")" "$reset"
+    if [[ -n "${body//[[:space:]]/}" ]]; then printf '\n'; print_body "$body" "  "; fi
+    rsum=$(reactions "$react")
+    [[ -n "$rsum" ]] && printf '\n  %s%s%s\n' "$dim" "$rsum" "$reset"
+  done <<<"$rows"
+}
+
+render_inline() {
+  local n; n=$(jq 'length' <<<"$inline")
+  (( n == 0 )) && return 0
+  # Order: top-level comments by (file, time), each followed by its replies.
+  local rows; rows=$(jq -r '
+    . as $all
+    | [ .[] | select(.in_reply_to_id == null) ]
+    | sort_by(.path, .created_at)
+    | map( . as $t
+           | [ ($t + {depth:0}) ]
+             + ( [ $all[] | select(.in_reply_to_id == $t.id) ]
+                 | sort_by(.created_at) | map(. + {depth:1}) ) )
+    | flatten
+    | .[]
+    | [ (.depth|tostring), (.path // ""),
+        ((.line // .original_line // "") | tostring),
+        (.user.login // "ghost"), (.author_association // ""),
+        (.created_at // ""), ((.body // "") | @base64),
+        ((.diff_hunk // "") | @base64) ] | @tsv' <<<"$inline")
+  [[ -z "$rows" ]] && return 0
+  section "Code review  ${dim}($n inline)${reset}${bold}${magenta}"
+  local depth path line login assoc created body64 hunk64 body hunk prev_path=""
+  while IFS=$'\t' read -r depth path line login assoc created body64 hunk64; do
+    body=$(base64 -d <<<"$body64")
+    if [[ "$depth" == "0" ]]; then
+      if [[ "$path" != "$prev_path" ]]; then
+        prev_path="$path"
+        printf '\n%s %s%s\n' "$bold$yellow" "$path" "$reset"
+      fi
+      hunk=$(base64 -d <<<"$hunk64")
+      printf '%s  line %s%s\n' "$dim" "$line" "$reset"
+      [[ -n "${hunk//[[:space:]]/}" ]] && render_hunk "$hunk" "  "
+      card "$login" "$assoc" "$created" '[]' "$body" "  "
+    else
+      card "$login" "$assoc" "$created" '[]' "$body" "      " "↳ "
+    fi
+  done <<<"$rows"
+}
+
+render() {
+  # Header: title #num · opened by @author · state
+  local htitle hnum hauthor hstate
+  IFS=$'\t' read -r htitle hnum hauthor hstate <<<"$(jq -r \
+    '[.title, (.number|tostring), .author.login, (.state // "")] | @tsv' <<<"$meta")"
+  printf '%s%s%s %s#%s%s\n' "$bold" "$htitle" "$reset" "$dim" "$hnum" "$reset"
+  printf '%sopened by %s@%s%s' "$dim" "$reset$cyan" "$hauthor" "$reset"
+  [[ -n "$hstate" ]] && printf '%s · %s%s' "$dim" "$hstate" "$reset"
+  printf '\n'
+  rule
+
+  # Original post.
+  card "$hauthor" AUTHOR \
+    "$(jq -r '.createdAt' <<<"$meta")" '[]' \
+    "$(jq -r '.body // "_No description._"' <<<"$meta")"
+
+  # PR-only sections.
+  if [[ "$kind" == pr ]]; then
+    render_reviews
+    render_inline
+  fi
+
+  # The top-level conversation.
+  local n i
+  n=$(jq '.comments | length' <<<"$meta")
+  if (( n > 0 )); then
+    section "Conversation  ${dim}($n)${reset}${bold}${magenta}"
+    for (( i=0; i<n; i++ )); do
+      echo; rule
+      card \
+        "$(jq -r ".comments[$i].author.login // \"ghost\"" <<<"$meta")" \
+        "$(jq -r ".comments[$i].authorAssociation // \"\"" <<<"$meta")" \
+        "$(jq -r ".comments[$i].createdAt" <<<"$meta")" \
+        "$(jq -c ".comments[$i].reactionGroups // []" <<<"$meta")" \
+        "$(jq -r ".comments[$i].body // \"\"" <<<"$meta")"
+    done
+  else
+    printf '\n  %sNo comments yet.%s\n' "$dim" "$reset"
+  fi
+  return 0
+}
+
+out=$(render)
+if [[ -t 1 ]]; then
+  printf '%s\n' "$out" | less -R -+X --tilde
+else
+  printf '%s\n' "$out"
+fi

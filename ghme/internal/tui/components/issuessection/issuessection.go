@@ -1,0 +1,499 @@
+package issuessection
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/dlvhdr/gh-dash/v4/internal/config"
+	"github.com/dlvhdr/gh-dash/v4/internal/data"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/issuerow"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/section"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/table"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/tasks"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
+	"github.com/dlvhdr/gh-dash/v4/internal/utils"
+)
+
+const SectionType = "issue"
+
+// tagColumnWidth is the fixed width of the local "Tag" badge column.
+const tagColumnWidth = 12
+
+type Model struct {
+	section.BaseModel
+	Issues []data.IssueData
+}
+
+func NewModel(
+	id int,
+	ctx *context.ProgramContext,
+	cfg config.IssuesSectionConfig,
+	lastUpdated time.Time,
+	createdAt time.Time,
+) Model {
+	m := Model{}
+	m.BaseModel = section.NewModel(
+		ctx,
+		section.NewSectionOptions{
+			Id:          id,
+			Config:      cfg.ToSectionConfig(),
+			Type:        SectionType,
+			Columns:     GetSectionColumns(cfg, ctx),
+			Singular:    m.GetItemSingularForm(),
+			Plural:      m.GetItemPluralForm(),
+			LastUpdated: lastUpdated,
+			CreatedAt:   createdAt,
+		},
+	)
+	m.Issues = []data.IssueData{}
+
+	return m
+}
+
+func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+
+		if m.IsSearchFocused() {
+			switch msg.String() {
+			case "ctrl+c", "esc":
+				m.SearchBar.SetValue(m.SearchValue)
+				blinkCmd := m.SetIsSearching(false)
+				return m, blinkCmd
+
+			case "enter":
+				m.SearchValue = m.SearchBar.Value()
+				m.SyncSmartFilterWithSearchValue()
+				m.SetIsSearching(false)
+				m.ResetRows()
+				return m, tea.Batch(m.FetchNextPageSectionRows()...)
+			}
+
+			break
+		}
+
+		if m.IsPromptConfirmationFocused() {
+			switch msg.String() {
+			case "ctrl+c", "esc":
+				m.PromptConfirmationBox.Reset()
+				cmd = m.SetIsPromptConfirmationShown(false)
+				return m, cmd
+
+			case "enter":
+				input := m.PromptConfirmationBox.Value()
+				action := m.GetPromptConfirmationAction()
+				if input == "" || input == "Y" || input == "y" {
+					issue := m.GetCurrRow()
+					sid := tasks.SectionIdentifier{Id: m.Id, Type: SectionType}
+					switch action {
+					case "close":
+						cmd = tasks.CloseIssue(m.Ctx, sid, issue)
+					case "reopen":
+						cmd = tasks.ReopenIssue(m.Ctx, sid, issue)
+					}
+				}
+
+				m.PromptConfirmationBox.Reset()
+				blinkCmd := m.SetIsPromptConfirmationShown(false)
+
+				return m, tea.Batch(cmd, blinkCmd)
+			}
+			break
+		}
+
+		switch {
+		case key.Matches(msg, keys.IssueKeys.ToggleSmartFiltering):
+			if m.HasCurrentRepoNameInConfiguredFilter() || !m.HasRepoNameInConfiguredFilter() {
+				m.IsFilteredByCurrentRemote = !m.IsFilteredByCurrentRemote
+			}
+			searchValue := m.GetSearchValue()
+			if m.SearchValue != searchValue {
+				m.SearchValue = searchValue
+				m.SearchBar.SetValue(searchValue)
+				m.SetIsSearching(false)
+				m.ResetRows()
+				return m, tea.Batch(m.FetchNextPageSectionRows()...)
+			}
+		}
+
+	case tasks.UpdateIssueMsg:
+		for i, currIssue := range m.Issues {
+			if currIssue.Number == msg.IssueNumber {
+				if msg.IsClosed != nil {
+					if *msg.IsClosed {
+						currIssue.State = "CLOSED"
+					} else {
+						currIssue.State = "OPEN"
+					}
+				}
+				if msg.Labels != nil {
+					currIssue.Labels.Nodes = msg.Labels.Nodes
+				}
+				if msg.NewComment != nil {
+					currIssue.Comments.Nodes = append(currIssue.Comments.Nodes, *msg.NewComment)
+				}
+				if msg.AddedAssignees != nil {
+					currIssue.Assignees.Nodes = addAssignees(
+						currIssue.Assignees.Nodes, msg.AddedAssignees.Nodes)
+				}
+				if msg.RemovedAssignees != nil {
+					currIssue.Assignees.Nodes = removeAssignees(
+						currIssue.Assignees.Nodes, msg.RemovedAssignees.Nodes)
+				}
+				m.Issues[i] = currIssue
+				m.SetIsLoading(false)
+				m.Table.SetRows(m.BuildRows())
+				break
+			}
+		}
+
+	case SectionIssuesFetchedMsg:
+		if m.LastFetchTaskId == msg.TaskId {
+			if m.PageInfo != nil {
+				m.Issues = append(m.Issues, msg.Issues...)
+			} else {
+				m.Issues = msg.Issues
+			}
+			m.TotalCount = msg.TotalCount
+			m.SetIsLoading(false)
+			m.PageInfo = &msg.PageInfo
+			m.Table.SetRows(m.BuildRows())
+			m.UpdateLastUpdated(time.Now())
+			m.UpdateTotalItemsCount(m.TotalCount)
+		}
+	}
+
+	search, searchCmd := m.SearchBar.Update(msg)
+	m.SearchBar = search
+
+	prompt, promptCmd := m.PromptConfirmationBox.Update(msg)
+	m.PromptConfirmationBox = prompt
+
+	table, tableCmd := m.Table.Update(msg)
+	m.Table = table
+
+	return m, tea.Batch(cmd, searchCmd, promptCmd, tableCmd)
+}
+
+func GetSectionColumns(
+	cfg config.IssuesSectionConfig,
+	ctx *context.ProgramContext,
+) []table.Column {
+	dLayout := ctx.Config.Defaults.Layout.Issues
+	sLayout := cfg.Layout
+
+	updatedAtLayout := config.MergeColumnConfigs(
+		dLayout.UpdatedAt,
+		sLayout.UpdatedAt,
+	)
+	createdAtLayout := config.MergeColumnConfigs(
+		dLayout.CreatedAt,
+		sLayout.CreatedAt,
+	)
+	stateLayout := config.MergeColumnConfigs(dLayout.State, sLayout.State)
+	repoLayout := config.MergeColumnConfigs(dLayout.Repo, sLayout.Repo)
+	titleLayout := config.MergeColumnConfigs(dLayout.Title, sLayout.Title)
+	creatorLayout := config.MergeColumnConfigs(dLayout.Creator, sLayout.Creator)
+	assigneesLayout := config.MergeColumnConfigs(
+		dLayout.Assignees,
+		sLayout.Assignees,
+	)
+	commentsLayout := config.MergeColumnConfigs(
+		dLayout.Comments,
+		sLayout.Comments,
+	)
+	reactionsLayout := config.MergeColumnConfigs(
+		dLayout.Reactions,
+		sLayout.Reactions,
+	)
+
+	return []table.Column{
+		{
+			Title:  "",
+			Width:  stateLayout.Width,
+			Hidden: stateLayout.Hidden,
+		},
+		{
+			Title:  "",
+			Width:  repoLayout.Width,
+			Hidden: repoLayout.Hidden,
+		},
+		{
+			Title:  "Title",
+			Grow:   utils.BoolPtr(true),
+			Hidden: titleLayout.Hidden,
+		},
+		{
+			Title: "Tag",
+			Width: utils.IntPtr(tagColumnWidth),
+		},
+		{
+			Title:  "Creator",
+			Width:  creatorLayout.Width,
+			Hidden: creatorLayout.Hidden,
+		},
+		{
+			Title:  "Assignees",
+			Width:  assigneesLayout.Width,
+			Hidden: assigneesLayout.Hidden,
+		},
+		{
+			Title:  constants.CommentsIcon,
+			Width:  &issueNumCommentsCellWidth,
+			Hidden: commentsLayout.Hidden,
+		},
+		{
+			Title:  "",
+			Width:  &issueNumCommentsCellWidth,
+			Hidden: reactionsLayout.Hidden,
+		},
+		{
+			Title:  "󱦻",
+			Width:  updatedAtLayout.Width,
+			Hidden: updatedAtLayout.Hidden,
+		},
+		{
+			Title:  "󱡢",
+			Width:  createdAtLayout.Width,
+			Hidden: createdAtLayout.Hidden,
+		},
+	}
+}
+
+// visibleIssues returns the issues that pass the active tag filter, in display
+// order. BuildRows, NumRows and GetCurrRow all go through this so the table
+// cursor and the underlying data stay index-aligned while a filter is active.
+func (m Model) visibleIssues() []data.IssueData {
+	if m.TagFilter == "" {
+		return m.Issues
+	}
+	store := data.GetTagStore()
+	needle := strings.ToLower(m.TagFilter)
+	out := make([]data.IssueData, 0, len(m.Issues))
+	for _, issue := range m.Issues {
+		tag := strings.ToLower(store.Get(issue.GetUrl()))
+		if strings.Contains(tag, needle) {
+			out = append(out, issue)
+		}
+	}
+	return out
+}
+
+func (m Model) BuildRows() []table.Row {
+	var rows []table.Row
+	for _, currIssue := range m.visibleIssues() {
+		issueModel := issuerow.Issue{Ctx: m.Ctx, Data: currIssue, ShowAuthorIcon: m.ShowAuthorIcon}
+		rows = append(rows, issueModel.ToTableRow())
+	}
+
+	if rows == nil {
+		rows = []table.Row{}
+	}
+
+	return rows
+}
+
+// SetTagFilter narrows the section to items whose tag matches filter (empty
+// clears it), resets the cursor to the top, and rebuilds the visible rows.
+func (m *Model) SetTagFilter(filter string) {
+	m.TagFilter = filter
+	m.Table.ResetCurrItem()
+	m.Table.SetRows(m.BuildRows())
+}
+
+// RefreshRows rebuilds the visible rows in place (e.g. after a tag changes),
+// without moving the cursor.
+func (m *Model) RefreshRows() {
+	m.Table.SetRows(m.BuildRows())
+}
+
+func (m *Model) NumRows() int {
+	return len(m.visibleIssues())
+}
+
+func (m *Model) GetCurrRow() data.RowData {
+	visible := m.visibleIssues()
+	idx := m.Table.GetCurrItem()
+	if idx < 0 || idx >= len(visible) {
+		return nil
+	}
+	issue := visible[idx]
+	return &issue
+}
+
+func (m *Model) FetchNextPageSectionRows() []tea.Cmd {
+	if m == nil {
+		return nil
+	}
+
+	if m.PageInfo != nil && !m.PageInfo.HasNextPage {
+		return nil
+	}
+
+	var cmds []tea.Cmd
+
+	startCursor := time.Now().String()
+	if m.PageInfo != nil {
+		startCursor = m.PageInfo.StartCursor
+	}
+	taskId := fmt.Sprintf("fetching_issues_%d_%s", m.Id, startCursor)
+	m.LastFetchTaskId = taskId
+	task := context.Task{
+		Id:        taskId,
+		StartText: fmt.Sprintf(`Fetching issues for "%s"`, m.Config.Title),
+		FinishedText: fmt.Sprintf(
+			`Issues for "%s" have been fetched`,
+			m.Config.Title,
+		),
+		State: context.TaskStart,
+		Error: nil,
+	}
+	startCmd := m.Ctx.StartTask(task)
+	cmds = append(cmds, startCmd)
+
+	fetchCmd := func() tea.Msg {
+		limit := m.Config.Limit
+		if limit == nil {
+			limit = &m.Ctx.Config.Defaults.IssuesLimit
+		}
+		res, err := data.FetchIssues(m.GetFilters(), *limit, m.PageInfo)
+		if err != nil {
+			return constants.TaskFinishedMsg{
+				SectionId:   m.Id,
+				SectionType: m.Type,
+				TaskId:      taskId,
+				Err:         err,
+			}
+		}
+
+		return constants.TaskFinishedMsg{
+			SectionId:   m.Id,
+			SectionType: m.Type,
+			TaskId:      taskId,
+			Msg: SectionIssuesFetchedMsg{
+				Issues:     res.Issues,
+				TotalCount: res.TotalCount,
+				PageInfo:   res.PageInfo,
+				TaskId:     taskId,
+			},
+		}
+	}
+	cmds = append(cmds, fetchCmd)
+
+	return cmds
+}
+
+func (m *Model) UpdateLastUpdated(t time.Time) {
+	m.Table.UpdateLastUpdated(t)
+}
+
+func (m *Model) ResetRows() {
+	m.Issues = nil
+	m.BaseModel.ResetRows()
+}
+
+func FetchAllSections(
+	ctx *context.ProgramContext,
+) (sections []section.Section, fetchAllCmd tea.Cmd) {
+	sectionConfigs := ctx.Config.IssuesSections
+	sections = make([]section.Section, 0, len(sectionConfigs))
+	for i, sectionConfig := range sectionConfigs {
+		sectionModel := NewModel(
+			i+1,
+			ctx,
+			sectionConfig,
+			time.Now(),
+			time.Now(),
+		) // 0 is the search section
+		if sectionConfig.Layout.CreatorIcon.Hidden != nil {
+			sectionModel.ShowAuthorIcon = !*sectionConfig.Layout.CreatorIcon.Hidden
+		}
+		sections = append(sections, &sectionModel)
+	}
+	// ghme patch: lazy-load. Build the section models but DON'T fetch their rows
+	// here. The ui layer fetches only the active section and lazy-loads the rest
+	// on first view, so startup/refresh only pays for the tab you're looking at.
+	return sections, nil
+}
+
+type SectionIssuesFetchedMsg struct {
+	Issues     []data.IssueData
+	TotalCount int
+	PageInfo   data.PageInfo
+	TaskId     string
+}
+
+func addAssignees(assignees, addedAssignees []data.Assignee) []data.Assignee {
+	newAssignees := assignees
+	for _, assignee := range addedAssignees {
+		if !assigneesContains(newAssignees, assignee) {
+			newAssignees = append(newAssignees, assignee)
+		}
+	}
+
+	return newAssignees
+}
+
+func removeAssignees(
+	assignees, removedAssignees []data.Assignee,
+) []data.Assignee {
+	newAssignees := []data.Assignee{}
+	for _, assignee := range assignees {
+		if !assigneesContains(removedAssignees, assignee) {
+			newAssignees = append(newAssignees, assignee)
+		}
+	}
+
+	return newAssignees
+}
+
+func assigneesContains(assignees []data.Assignee, assignee data.Assignee) bool {
+	return slices.Contains(assignees, assignee)
+}
+
+func (m Model) GetItemSingularForm() string {
+	return "Issue"
+}
+
+func (m Model) GetItemPluralForm() string {
+	return "Issues"
+}
+
+func (m Model) GetTotalCount() int {
+	return m.TotalCount
+}
+
+func (m *Model) GetIsLoading() bool {
+	return m.IsLoading
+}
+
+func (m *Model) SetIsLoading(val bool) {
+	m.IsLoading = val
+	m.Table.SetIsLoading(val)
+}
+
+func (m Model) GetPagerContent() string {
+	pagerContent := ""
+	if m.TotalCount > 0 {
+		pagerContent = fmt.Sprintf(
+			"%v %v • %v %v/%v • Fetched %v",
+			constants.WaitingIcon,
+			m.LastUpdated().Format("01/02 15:04:05"),
+			m.SingularForm,
+			m.Table.GetCurrItem()+1,
+			m.TotalCount,
+			len(m.Table.Rows),
+		)
+	}
+	pager := m.Ctx.Styles.ListViewPort.PagerStyle.Render(pagerContent)
+	return pager
+}

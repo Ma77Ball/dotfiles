@@ -1,0 +1,15 @@
+# --- Secrets (never commit to this PUBLIC repo) ---
+# Per-machine secret env vars (tokens, etc.). Set these yourself on each box.
+bashrc.d/secrets.local.sh
+**/secrets.local.sh
+*.token
+
+# --- Build artifacts ---
+# The patched gh-dash binary built by ghme-rebuild (also ignored by ghme/.gitignore).
+ghme/gh-dash
+# msgme builds to ~/.local/bin/msgme; never vendor a compiled binary.
+msgme/bin/
+msgme/msgme
+
+# --- Backups created by install.sh's create_symlink ---
+*.bak

@@ -1,8 +1,14 @@
 vim.g.mapleader = " "
 -- file explorer (neo-tree) remap
+-- Toggle neo-tree open/closed
 vim.keymap.set("n", "<leader>pv", function()
-  vim.cmd("Neotree toggle")
-end)
+  vim.cmd("Neotree filesystem toggle")
+end, { desc = "Neo-tree toggle" })
+
+-- Reveal the current file's location in neo-tree
+vim.keymap.set("n", "<leader>pf", function()
+  vim.cmd("Neotree filesystem reveal")
+end, { desc = "Neo-tree reveal current file" })
 
 -- Run current file
 vim.keymap.set("n", "<leader>r", function()

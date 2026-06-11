@@ -1,0 +1,15 @@
+# msgme config - a terminal dashboard of your messages.
+# Docs: see README. Edit and re-run msgme.
+
+# How often (minutes) to auto-refresh sections. 0 disables.
+refreshMinutes: 5
+
+slack:
+  enabled: true
+  # A Slack *user* OAuth token (xoxp-...). Prefer exporting SLACK_TOKEN in your
+  # shell instead of committing it here; the env var overrides this value.
+  token: ""
+  # Which Slack tabs to show.
+  sections:
+    - DMs
+    - Mentions

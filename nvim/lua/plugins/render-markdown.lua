@@ -6,10 +6,4 @@ return {
   },
   ft = { 'markdown' },
   opts = {},
-  config = function(_, opts)
-    require('render-markdown').setup(opts)
-    -- Toggle rendering on/off
-    vim.keymap.set('n', '<leader>mr', '<cmd>RenderMarkdown toggle<cr>',
-      { desc = 'Markdown: toggle render' })
-  end,
 }

@@ -30,7 +30,7 @@ env = WEZTERM_SHELL_SKIP_ALL=1
 # window-theme = ghostty; foreground keeps the title/icons readable.
 window-theme = ghostty
 window-titlebar-background = 424242
-window-titlebar-foreground = f8dcc0
+window-titlebar-foreground = ffffff
 
 # AdventureTime color scheme (Ghostty has no built-in one, so defined by hand to
 # match wezterm's "AdventureTime").

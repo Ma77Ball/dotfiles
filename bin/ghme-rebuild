@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# ghme-rebuild - build the patched gh-dash (ghme) from the source vendored in
+# dotfiles and install it as the `gh dash` extension binary.
+#
+# The full, already-patched gh-dash source lives in dotfiles/ghme (vendored just
+# like dotfiles/msgme), so ghme builds on any machine that has Go: no upstream
+# clone, no network, no patch step. To change ghme's behavior, edit the Go source
+# under dotfiles/ghme directly, then run ghme-rebuild (or re-run install.sh).
+#
+# Usage: ghme-rebuild
+#   GHME_SRC=/path/to/ghme ghme-rebuild   # override the source location
+set -euo pipefail
+
+# Locate the vendored source. Prefer $GHME_SRC, then $DOTFILES/ghme, then the
+# usual dotfiles clone locations. A valid source dir contains go.mod.
+src="${GHME_SRC:-}"
+if [[ -z "$src" ]]; then
+  for cand in "${DOTFILES:-}/ghme" "$HOME/dotfiles/ghme" "$HOME/.dotfiles/ghme"; do
+    if [[ -n "$cand" && -f "$cand/go.mod" ]]; then src="$cand"; break; fi
+  done
+fi
+if [[ -z "$src" || ! -f "$src/go.mod" ]]; then
+  echo "ghme-rebuild: can't find the vendored gh-dash source (a dir with go.mod)." >&2
+  echo "  Set GHME_SRC=/path/to/dotfiles/ghme and re-run." >&2
+  exit 1
+fi
+
+command -v go >/dev/null || { echo "ghme-rebuild: needs Go (go.dev/dl)" >&2; exit 1; }
+
+extdir="$HOME/.local/share/gh/extensions/gh-dash"
+ext="$extdir/gh-dash"
+mkdir -p "$extdir"
+
+echo "ghme-rebuild: building gh-dash from $src"
+echo "  compiling (a minute or so)..."
+# Build into a temp file in the SAME dir so the final install is an atomic
+# rename on one filesystem (works even while ghme is running: the live process
+# keeps the old inode, the next launch picks up the new binary).
+tmp="$extdir/.gh-dash.build.$$"
+trap 'rm -f "$tmp"' EXIT
+( cd "$src" && GOFLAGS=-mod=mod go build -trimpath -o "$tmp" . )
+
+# Register as a gh extension so `gh dash` dispatches to this binary. A binary
+# extension needs only the dir, the executable, and a manifest.yml; create the
+# manifest if missing so this works with no `gh extension install` / network.
+if [[ ! -f "$extdir/manifest.yml" ]]; then
+  cat >"$extdir/manifest.yml" <<EOF
+owner: dlvhdr
+name: gh-dash
+host: github.com
+tag: vendored
+ispinned: true
+path: $ext
+EOF
+fi
+
+mv -f "$tmp" "$ext"
+chmod +x "$ext"
+trap - EXIT
+echo "ghme-rebuild: installed -> $ext"
+echo "  (quit and relaunch ghme to pick it up)"
