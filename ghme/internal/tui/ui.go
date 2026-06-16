@@ -396,6 +396,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.footer.SetLeftSection(m.tagInputView())
 			return m, m.tagInput.Focus()
 
+		case (m.ctx.View == config.PRsView || m.ctx.View == config.IssuesView) &&
+			key.Matches(msg, m.keys.GroupBy):
+			if currSection != nil {
+				mode := currSection.CycleGroupBy()
+				currSection.RefreshRows()
+				cmd = m.notify(fmt.Sprintf("Grouping by %s", mode.Label()))
+			}
+			return m, cmd
+
 		case key.Matches(msg, m.keys.Quit):
 			if !m.ctx.Config.ConfirmQuit {
 				return m, tea.Quit

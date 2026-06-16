@@ -53,11 +53,55 @@ type BaseModel struct {
 	// TagFilter, when non-empty, restricts the visible rows to items whose local
 	// tag contains it (case-insensitive). It's session-only and per-section.
 	TagFilter string
+	// GroupBy clusters the visible rows by a key (tag/repo/author) via a stable
+	// sort, or leaves GitHub's returned order untouched (GroupByNone). It's
+	// session-only and per-section; the zero value GroupByTag is the launch default.
+	GroupBy GroupBy
+}
+
+// GroupBy selects how a section's rows are clustered. Grouping is a stable sort
+// by the group key, so items sharing a key become adjacent while their original
+// relative order is preserved within each group.
+type GroupBy int
+
+const (
+	GroupByTag    GroupBy = iota // default
+	GroupByRepo
+	GroupByAuthor
+	GroupByNone
+)
+
+// groupByLabels are the footer/notification labels for each mode, indexed by GroupBy.
+var groupByLabels = [...]string{"tag", "repo", "author", "none"}
+
+// Label returns the human-readable name of the grouping mode.
+func (g GroupBy) Label() string {
+	if int(g) < 0 || int(g) >= len(groupByLabels) {
+		return "none"
+	}
+	return groupByLabels[g]
+}
+
+// Next returns the following mode in the tag → repo → author → none → tag cycle.
+func (g GroupBy) Next() GroupBy {
+	return GroupBy((int(g) + 1) % len(groupByLabels))
 }
 
 // GetTagFilter returns the active local tag filter for this section.
 func (m *BaseModel) GetTagFilter() string {
 	return m.TagFilter
+}
+
+// GetGroupBy returns the active row-grouping mode for this section.
+func (m *BaseModel) GetGroupBy() GroupBy {
+	return m.GroupBy
+}
+
+// CycleGroupBy advances to the next grouping mode and returns it. The rows are
+// regrouped on the next BuildRows/RefreshRows call.
+func (m *BaseModel) CycleGroupBy() GroupBy {
+	m.GroupBy = m.GroupBy.Next()
+	return m.GroupBy
 }
 
 type NewSectionOptions struct {
@@ -166,6 +210,11 @@ type Section interface {
 	SetTagFilter(filter string)
 	// GetTagFilter returns the active local tag filter.
 	GetTagFilter() string
+	// CycleGroupBy advances the section's row grouping to the next mode and
+	// returns it. Call RefreshRows afterwards to apply it to the visible rows.
+	CycleGroupBy() GroupBy
+	// GetGroupBy returns the active row-grouping mode.
+	GetGroupBy() GroupBy
 	// RefreshRows rebuilds the visible rows in place (e.g. after a tag changes).
 	RefreshRows()
 }

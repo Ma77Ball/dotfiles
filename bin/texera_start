@@ -12,6 +12,10 @@
 #             on :5005, ready for :TexeraDebug in nvim (runs ./texera_debug)
 #   docker    single-node, everything in containers (bin/single-node)
 #   k8s       helm install into the current kube context (prod values)
+#   fresh     full from-scratch install test: stop everything, wipe the dev DB
+#             volume (re-inits from sql/), clean-rebuild the dist, then start dev
+#   refresh   non-destructive: rebuild the backend and restart the app on the new
+#             build, WITHOUT wiping any data (use after backend code changes)
 #
 # Usage:
 #   ./start_app.sh <target...>        start targets, e.g. `./start_app.sh obs` or `./start_app.sh db infra app`
@@ -135,6 +139,26 @@ launcher() { find "$ROOT" -maxdepth 5 -type f -path "*/target/*/bin/$1" ! -path 
 have_container() { docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$1"; }
 running_container() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$1"; }
 
+# Wait for lakeFS to actually serve before we launch backends. file-service runs
+# LakeFSStorageClient.healthCheck at boot and exit(1)s if lakeFS isn't reachable
+# (FileService.scala). 'docker compose up -d' for infra returns BEFORE lakeFS is
+# serving, so a back-to-back app start (fresh/dev/refresh) races it and
+# file-service crashes, :9092 goes down, and the UI's /api/dataset/create gets
+# ECONNREFUSED ("dataset creation failed"). Poll :8000/_health; warn (don't die)
+# if it never comes, so callers without infra aren't blocked hard.
+wait_for_lakefs() {
+  command -v curl >/dev/null 2>&1 || { port_open 8000 && return 0 || { sleep 5; return 1; }; }
+  printf "  waiting for lakeFS health (:8000)"
+  local i
+  for i in $(seq 1 60); do
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8000/_health 2>/dev/null)" == 200 ]] \
+      && { echo; ok "lakeFS healthy (:8000)"; return 0; }
+    printf '.'; sleep 1
+  done
+  echo; warn "lakeFS not healthy on :8000 after 60s, file-service may crash on startup"
+  return 1
+}
+
 # ---- port clearing ---------------------------------------------------------
 # pids LISTENing on a TCP port — prefer lsof, fall back to ss, then to nothing.
 pids_on_port() {
@@ -192,6 +216,88 @@ ensure_built() {
   [[ ${#missing[@]} -eq 0 ]] && return 0
   warn "missing launchers: ${missing[*]} — building"
   rebuild
+}
+
+# ---- fresh (from-scratch install test) -------------------------------------
+# Simulates a clean machine: tear the whole dev stack down, drop the Postgres
+# data volume so it re-inits from sql/, clean-rebuild the dist on JDK 17, then
+# bring infra+app back up. Use to verify a fresh install works end to end.
+# WARNING: this WIPES the dev database (workflows, users, projects, dataset
+# metadata all live in texera_db). Use 'refresh' for everyday code changes.
+#
+# DB-BEFORE-BUILD: the sbt build runs JOOQ code generation against a LIVE
+# Postgres on :5432 (it introspects the schema to emit the generated table
+# classes, e.g. WORKFLOW_COVER_IMAGE). So the freshly-wiped DB must be up and
+# re-initialized from sql/ BEFORE 'rebuild clean'. If we build with the DB down,
+# codegen fails ("Connection to localhost:5432 refused"), the build silently
+# falls back to stale generated classes, any new table is missing, and the clean
+# compile dies with "not found: value <TABLE>". That is why we up_db first and
+# only start infra+app after the build.
+run_fresh() {
+  need docker
+  say "fresh: tearing down the dev stack"
+  down_app; down_obs
+  # WIPE INFRA VOLUMES TOO, not just the DB. 'down_infra' (plain 'compose down')
+  # keeps lakeFS + MinIO's named volumes (texera-lakefs_minio_data /
+  # _postgres_data), so the object store SURVIVES a fresh DB wipe. That drift is
+  # fatal: the re-initialized Texera DB restarts dataset IDs at 1, but lakeFS
+  # still holds the old per-dataset repos (dataset-1, dataset-2, ...). Creating
+  # or uploading a dataset then fails with lakeFS 409 "error creating
+  # repository: not unique" and the upload is rejected. 'down -v' drops the
+  # project's volumes so the DB and the object store reset together.
+  say "fresh: tearing down infra + wiping lakeFS/MinIO volumes"
+  dc "$INFRA_COMPOSE" down -v >/dev/null 2>&1 && ok "minio/lakefs down (volumes wiped)" || ok "infra already down"
+  # remove the container + its data volume so the next up_db re-inits from sql/
+  have_container "$PG_CONTAINER" && { docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 && ok "removed $PG_CONTAINER"; }
+  # Wipe the volume, but DISTINGUISH the failure cases instead of swallowing them.
+  # 'docker volume rm' returns non-zero if another container still references the
+  # volume; if we ignore that, the OLD schema survives, up_db mounts it (a
+  # non-empty volume does NOT re-run sql/ init), and the build introspects a
+  # stale schema -> clean compile fails on whatever tables this branch changed.
+  if docker volume inspect texera-dev-pgdata >/dev/null 2>&1; then
+    docker volume rm texera-dev-pgdata >/dev/null 2>&1 \
+      && ok "wiped DB volume texera-dev-pgdata (will re-init from sql/)" \
+      || die "could not remove volume texera-dev-pgdata: another container still references it, so the old schema would survive. Find + remove it: docker ps -a --filter volume=texera-dev-pgdata"
+  else
+    ok "DB volume already absent (will re-init from sql/)"
+  fi
+  # GUARD: fresh must build against ITS OWN freshly-initialized DB. up_db reuses
+  # whatever already listens on :5432 ("postgres already on :5432, using it").
+  # Having just removed our own $PG_CONTAINER, anything STILL on :5432 is foreign:
+  # a texera_postgres checkout, a leftover '--offset' instance, or another
+  # texera* checkout's dev DB. JOOQ would then generate classes from THAT
+  # database's schema (a different branch) and the clean compile would fail
+  # non-deterministically. Refuse rather than silently poison the build.
+  if port_open 5432; then
+    die "fresh: something other than $PG_CONTAINER is already serving :5432 (we just removed ours). The build would generate JOOQ classes from that DB's schema, not this branch's sql/. Stop it first (docker ps --filter publish=5432), then re-run 'texera_start fresh'."
+  fi
+  # bring the wiped DB up first so JOOQ codegen sees the fresh schema (see above).
+  # the postgres image only opens :5432 after its sql/ init scripts finish, so
+  # up_db's port wait guarantees the schema is loaded before we build.
+  say "fresh: starting db (re-inits from sql/), needed for JOOQ codegen before the build"
+  up_db
+  port_open 5432 || die "fresh: postgres never opened :5432, so JOOQ codegen cannot run. Check: docker logs $PG_CONTAINER"
+  rebuild clean
+  say "fresh: starting dev (infra + app)"
+  local t
+  for t in infra app; do start_target "$t"; done
+}
+
+# ---- refresh (non-destructive rebuild + restart) ---------------------------
+# Everyday "I changed backend code, show me the change" command. Recompiles and
+# relaunches the app on the new build WITHOUT touching any data: no DB wipe, no
+# volume removal. The frontend's ng serve already hot-reloads, so this is mainly
+# for backend Scala/Java edits, which 'dev'/'app' do NOT pick up on their own
+# (they only build when launchers are missing). Incremental build by default;
+# pass 'clean' for a full rebuild. Brings db+infra up if down (both idempotent,
+# never destructive).
+run_refresh() {
+  local mode="${1:-}"
+  say "refresh: rebuild + restart (data preserved, no wipe)"
+  down_app                 # stop services so they relaunch on the new build
+  rebuild "$mode"          # incremental dist by default; 'clean' for a full rebuild
+  up_db; up_infra          # ensure deps are up (idempotent; never wipes a volume)
+  up_app yes
 }
 
 # ---- db --------------------------------------------------------------------
@@ -266,6 +372,11 @@ up_app() {
   # the service dir, an unset TEXERA_HOME doubles the path (.../config-service/./config-service/...)
   # and the service dies "config not found". Pin it to the repo root.
   local home_env="TEXERA_HOME='$ROOT'"
+  # If infra (lakeFS) is up, wait for it to actually serve before launching
+  # backends: file-service health-checks lakeFS at boot and crashes if it loses
+  # the race (see wait_for_lakefs). No-op when lakeFS isn't running (e.g. app-be
+  # without infra), so this never blocks a backend-only start.
+  running_container texera-lakefs-lakefs && wait_for_lakefs || true
   local n path
   for n in "${DEV_BACKENDS[@]}"; do
     path="$(launcher "$n")"
@@ -420,6 +531,8 @@ case "$cmd" in
     echo "  ${c_grn}app-be${c_off} backend only (no frontend)   ${c_grn}dev${c_off} = db+infra+app"
     echo "  ${c_grn}debug${c_off} = full pipeline, engine under JDWP on :5005 (then :TexeraDebug in nvim)"
     echo "  ${c_grn}docker${c_off} single-node    ${c_grn}k8s${c_off} helm"
+    echo "  ${c_grn}fresh${c_off} = wipe DB + clean rebuild + start dev (from-scratch install test)"
+    echo "  ${c_grn}refresh${c_off} = rebuild + restart app, no data wipe (after code changes)"
     read -rp "start> " line
     [[ -n "${line:-}" ]] || die "nothing selected"
     read -ra TGTS <<< "$line"
@@ -433,6 +546,8 @@ case "$cmd" in
     for t in "${T[@]}"; do stop_target "$t"; done
     ;;
   debug)   shift; run_debug "$@" ;;   # full debug pipeline (engine under JDWP on :5005)
+  fresh)   run_fresh ;;               # wipe DB + clean rebuild + start dev (from-scratch install test)
+  refresh) shift; run_refresh "${1:-}" ;;   # non-destructive: rebuild + restart app, no data wipe
   rebuild) shift; down_app; rebuild "${1:-clean}" ;;   # stop app first; clean build by default
   attach)  attach ;;
   status)  status ;;

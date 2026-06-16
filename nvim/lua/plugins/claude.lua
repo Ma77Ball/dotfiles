@@ -12,14 +12,13 @@ return {
     "coder/claudecode.nvim",
     config = function()
       require("claudecode").setup({
-        -- Launch every Claude session directly in auto-accept-edits mode.
-        -- Claude Code's real permission modes are: default, plan, acceptEdits,
-        -- bypassPermissions (there is no "auto"). acceptEdits is the mode the UI
-        -- calls "auto-accept edits" (shift+tab) -- file edits apply without a
-        -- prompt, commands still ask. This is the base command for ALL entry
-        -- points (toggle, focus, send-selection, add-file), so any way you open
-        -- Claude it starts in auto-accept-edits mode.
-        terminal_cmd = "claude --permission-mode acceptEdits",
+        -- Launch every Claude session directly in auto mode.
+        -- `auto` is a real Claude Code permission mode (claude --permission-mode
+        -- choices: acceptEdits, auto, bypassPermissions, default, dontAsk, plan).
+        -- This is the base command for ALL entry points (toggle, focus,
+        -- send-selection, add-file), so any way you open Claude it starts in auto
+        -- mode.
+        terminal_cmd = "claude --permission-mode auto",
         terminal = {
           provider = "native",
           split_width_percentage = 0.30,

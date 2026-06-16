@@ -1,4 +1,7 @@
 vim.g.mapleader = " "
+
+-- Exit insert mode with `jj` (ergonomic alternative to <Esc>).
+vim.keymap.set("i", "jj", "<Esc>", { desc = "Exit insert mode" })
 -- file explorer (neo-tree) remap
 -- Toggle neo-tree open/closed
 vim.keymap.set("n", "<leader>pv", function()
@@ -24,8 +27,20 @@ vim.keymap.set("n", "<leader>r", function()
   end
 end)
 
+-- Free <Tab> from the jumplist (in a terminal <Tab> == <C-i> == jump-forward).
+-- Move jump-forward to Ctrl-Enter, and use Tab/Shift-Tab to indent/outdent.
+vim.keymap.set("n", "<C-CR>", "<C-i>", { desc = "Jump forward (jumplist)" })
+vim.keymap.set("n", "<Tab>", ">>", { desc = "Indent line" })
+vim.keymap.set("n", "<S-Tab>", "<<", { desc = "Outdent line" })
+-- Keep Tab/Shift-Tab indenting in visual mode (and reselect after)
+vim.keymap.set("x", "<Tab>", ">gv", { desc = "Indent selection" })
+vim.keymap.set("x", "<S-Tab>", "<gv", { desc = "Outdent selection" })
+
 -- Diagnostic keymaps
 vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, { desc = 'Go to previous diagnostic message' })
 vim.keymap.set('n', ']d', vim.diagnostic.goto_next, { desc = 'Go to next diagnostic message' })
 vim.keymap.set('n', '<leader>e', vim.diagnostic.open_float, { desc = 'Open floating diagnostic message' })
 vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open diagnostics list' })
+
+-- Open the PR for the current branch in the browser
+vim.keymap.set('n', '<leader>gp', '<cmd>!gh pr view --web<cr>', { desc = 'Git: open PR in browser' })

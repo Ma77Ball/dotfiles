@@ -48,6 +48,7 @@ type KeyMap struct {
 	CopyNumber            key.Binding
 	SetTag                key.Binding
 	TagFilter             key.Binding
+	GroupBy               key.Binding
 	Help                  key.Binding
 	Quit                  key.Binding
 }
@@ -133,6 +134,7 @@ func (k KeyMap) AppKeys() []key.Binding {
 		k.Search,
 		k.SetTag,
 		k.TagFilter,
+		k.GroupBy,
 	}
 }
 
@@ -212,6 +214,10 @@ var Keys = &KeyMap{
 	TagFilter: key.NewBinding(
 		key.WithKeys("F"),
 		key.WithHelp("F", "filter by tag"),
+	),
+	GroupBy: key.NewBinding(
+		key.WithKeys("b"),
+		key.WithHelp("b", "cycle group by (tag/repo/author/none)"),
 	),
 	Help: key.NewBinding(
 		key.WithKeys("?"),
@@ -324,6 +330,8 @@ func rebindUniversal(universal []config.Keybinding) error {
 			key = &Keys.SetTag
 		case "tagFilter":
 			key = &Keys.TagFilter
+		case "groupBy":
+			key = &Keys.GroupBy
 		case "help":
 			key = &Keys.Help
 		case "quit":

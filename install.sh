@@ -111,8 +111,8 @@ echo "--- Installing packages (manager: ${PM:-none}) ---"
 #   ripgrep (rg)           -- telescope live-grep / general search
 #   nodejs + npm           -- claudecode.nvim and many LSP/Mason servers
 #   git                    -- gitsigns, diffview, git-conflict, neo-tree git
-#   go                     -- builds msgme and the patched gh-dash (ghme) from
-#                             their vendored source under dotfiles/
+#   go                     -- builds msgme, todome, and the patched gh-dash
+#                             (ghme) from their vendored source under dotfiles/
 #   gh                     -- GitHub CLI; ghme wraps `gh dash`
 #   jq                     -- ghme-comments parses the GitHub API with jq
 #   cc + g++ + make        -- nvim-treesitter compiles each language parser from
@@ -301,6 +301,23 @@ if [ -d "$DIR/ghme" ] && [ -f "$DIR/ghme/go.mod" ]; then
     command -v gh > /dev/null 2>&1 || echo "  note: install gh (GitHub CLI) and 'gh auth login' so ghme can authenticate."
 else
     echo "  no vendored source at $DIR/ghme - skipping ghme build."
+fi
+
+echo "--- Building todome ---"
+# todome: a terminal todo tracker (add/edit/prioritize/complete tasks), built on
+# the same Bubbletea/gh-dash look as msgme. Source is vendored under
+# dotfiles/todome so it builds anywhere with Go. Tasks persist to
+# ~/.local/share/todome/tasks.json; no config or login is needed.
+if [ -d "$DIR/todome" ] && [ -f "$DIR/todome/go.mod" ]; then
+    if command -v go > /dev/null 2>&1; then
+        if ( cd "$DIR/todome" && go build -o "$HOME/.local/bin/todome" . ); then
+            echo "Installed todome to ~/.local/bin/todome"
+        else
+            echo "  (todome build failed - run 'cd $DIR/todome && go build' to investigate)"
+        fi
+    else
+        echo "  Go not installed - skipping todome. Later: cd $DIR/todome && go build -o ~/.local/bin/todome ."
+    fi
 fi
 
 echo "--- Setting Ghostty as the default terminal ---"

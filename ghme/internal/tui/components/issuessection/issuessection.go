@@ -273,18 +273,56 @@ func GetSectionColumns(
 // order. BuildRows, NumRows and GetCurrRow all go through this so the table
 // cursor and the underlying data stay index-aligned while a filter is active.
 func (m Model) visibleIssues() []data.IssueData {
-	if m.TagFilter == "" {
-		return m.Issues
+	issues := m.Issues
+	if m.TagFilter != "" {
+		store := data.GetTagStore()
+		needle := strings.ToLower(m.TagFilter)
+		out := make([]data.IssueData, 0, len(m.Issues))
+		for _, issue := range m.Issues {
+			tag := strings.ToLower(store.Get(issue.GetUrl()))
+			if strings.Contains(tag, needle) {
+				out = append(out, issue)
+			}
+		}
+		issues = out
+	}
+	return groupIssues(issues, m.GroupBy)
+}
+
+// groupIssues reorders issues so items sharing the active group key are
+// adjacent. It sorts a copy (never mutating the caller's slice, which stays
+// index-aligned with the table cursor) using a stable sort, so the original
+// relative order is preserved within each group. Items with an empty key
+// (untagged, or a missing repo/author) sort last. GroupByNone is a no-op.
+func groupIssues(issues []data.IssueData, by section.GroupBy) []data.IssueData {
+	if by == section.GroupByNone {
+		return issues
 	}
 	store := data.GetTagStore()
-	needle := strings.ToLower(m.TagFilter)
-	out := make([]data.IssueData, 0, len(m.Issues))
-	for _, issue := range m.Issues {
-		tag := strings.ToLower(store.Get(issue.GetUrl()))
-		if strings.Contains(tag, needle) {
-			out = append(out, issue)
+	keyOf := func(issue data.IssueData) string {
+		switch by {
+		case section.GroupByTag:
+			return store.Get(issue.GetUrl())
+		case section.GroupByRepo:
+			return issue.GetRepoNameWithOwner()
+		case section.GroupByAuthor:
+			return issue.Author.Login
 		}
+		return ""
 	}
+	out := make([]data.IssueData, len(issues))
+	copy(out, issues)
+	slices.SortStableFunc(out, func(a, b data.IssueData) int {
+		ka, kb := keyOf(a), keyOf(b)
+		switch {
+		case ka == "" && kb != "":
+			return 1
+		case ka != "" && kb == "":
+			return -1
+		default:
+			return strings.Compare(strings.ToLower(ka), strings.ToLower(kb))
+		}
+	})
 	return out
 }
 

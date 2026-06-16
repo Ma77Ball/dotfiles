@@ -10,6 +10,9 @@ ghme/gh-dash
 # msgme builds to ~/.local/bin/msgme; never vendor a compiled binary.
 msgme/bin/
 msgme/msgme
+# todome builds to ~/.local/bin/todome; never vendor a compiled binary.
+todome/bin/
+todome/todome
 
 # --- Backups created by install.sh's create_symlink ---
 *.bak

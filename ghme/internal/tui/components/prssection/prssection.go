@@ -419,18 +419,58 @@ func GetSectionColumns(
 // BuildRows, NumRows and GetCurrRow all go through this so the table cursor and
 // the underlying data stay index-aligned while a tag filter is active.
 func (m Model) visiblePrs() []prrow.Data {
-	if m.TagFilter == "" {
-		return m.Prs
+	prs := m.Prs
+	if m.TagFilter != "" {
+		store := data.GetTagStore()
+		needle := strings.ToLower(m.TagFilter)
+		out := make([]prrow.Data, 0, len(m.Prs))
+		for _, pr := range m.Prs {
+			tag := strings.ToLower(store.Get(pr.GetUrl()))
+			if strings.Contains(tag, needle) {
+				out = append(out, pr)
+			}
+		}
+		prs = out
+	}
+	return groupPrs(prs, m.GroupBy)
+}
+
+// groupPrs reorders prs so items sharing the active group key are adjacent. It
+// sorts a copy (never mutating the caller's slice, which stays index-aligned
+// with the table cursor) using a stable sort, so the original relative order is
+// preserved within each group. Items with an empty key (untagged, or a missing
+// repo/author) sort last so populated groups lead. GroupByNone is a no-op.
+func groupPrs(prs []prrow.Data, by section.GroupBy) []prrow.Data {
+	if by == section.GroupByNone {
+		return prs
 	}
 	store := data.GetTagStore()
-	needle := strings.ToLower(m.TagFilter)
-	out := make([]prrow.Data, 0, len(m.Prs))
-	for _, pr := range m.Prs {
-		tag := strings.ToLower(store.Get(pr.GetUrl()))
-		if strings.Contains(tag, needle) {
-			out = append(out, pr)
+	keyOf := func(pr prrow.Data) string {
+		switch by {
+		case section.GroupByTag:
+			return store.Get(pr.GetUrl())
+		case section.GroupByRepo:
+			return pr.GetRepoNameWithOwner()
+		case section.GroupByAuthor:
+			if pr.Primary != nil {
+				return pr.Primary.Author.Login
+			}
 		}
+		return ""
 	}
+	out := make([]prrow.Data, len(prs))
+	copy(out, prs)
+	slices.SortStableFunc(out, func(a, b prrow.Data) int {
+		ka, kb := keyOf(a), keyOf(b)
+		switch {
+		case ka == "" && kb != "":
+			return 1
+		case ka != "" && kb == "":
+			return -1
+		default:
+			return strings.Compare(strings.ToLower(ka), strings.ToLower(kb))
+		}
+	})
 	return out
 }
 

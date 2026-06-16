@@ -1,0 +1,3 @@
+# todome builds to ~/.local/bin/todome; never vendor a compiled binary.
+/todome
+bin/
