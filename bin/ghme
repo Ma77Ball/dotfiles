@@ -70,6 +70,10 @@ CUSTOM KEYS (defined in config.yml)
                conflicts shows a red glyph in the leftmost state column.
   U            update ALL your open PR branches at once (same as `ghme update-all`);
                prints an ok/conflict/failed line per PR.
+  R            (on a PR) retrigger CI by pushing an empty "re-run ci test" commit
+               to its branch, so every workflow re-runs from scratch (handy when a
+               check flaked). Checks the branch out into the launch dir first and
+               refuses to push from a diverged or dirty tree.
   v            view the conversation as readable, separated cards. For PRs this
                adds a Reviews section (approved / changes-requested badges) and
                an inline Code-review section grouped by file, threaded by reply,

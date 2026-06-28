@@ -3,6 +3,10 @@ return {
   {
     "akinsho/toggleterm.nvim",
     version = "*",
+    -- Load at startup so the <C-\> open_mapping (registered inside config below)
+    -- always exists. Without this, lazy.nvim treats the plugin as lazy, never
+    -- loads it, and <C-\> silently does nothing.
+    lazy = false,
     config = function()
       require("toggleterm").setup({
         open_mapping = [[<c-\>]], -- Ctrl-\ toggles the terminal from any tab

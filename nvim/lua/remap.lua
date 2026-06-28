@@ -44,3 +44,9 @@ vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open diagn
 
 -- Open the PR for the current branch in the browser
 vim.keymap.set('n', '<leader>gp', '<cmd>!gh pr view --web<cr>', { desc = 'Git: open PR in browser' })
+
+-- Toggle soft line wrapping
+vim.keymap.set('n', '<leader>w', function()
+  vim.wo.wrap = not vim.wo.wrap
+  print("wrap " .. (vim.wo.wrap and "on" or "off"))
+end, { desc = 'Toggle line wrap' })

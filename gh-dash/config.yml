@@ -67,6 +67,12 @@ keybindings:
       # you authored; prints an ok/conflict/failed line per PR. GH_PAGER=cat keeps
       # gh from piping the report into less inside the TUI's command runner.
       command: GH_PAGER=cat ghme update-all
+    - key: R                       # retrigger CI: push an empty "re-run ci test" commit
+      name: rerun-ci
+      # Checks out the PR branch in GHME_LAUNCH_DIR (latest commit), then pushes an
+      # empty commit so every workflow re-runs from scratch, handy when a check
+      # flaked. Refuses to push from a diverged/dirty tree. See ghme-rerun-ci.
+      command: ghme-rerun-ci {{.PrNumber}} '{{.HeadRefName}}'
     - key: v                       # full comment thread, rendered as readable cards
       name: comments
       command: ghme-comments pr {{.PrNumber}} {{.RepoName}}

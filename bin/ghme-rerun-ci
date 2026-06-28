@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# ghme-rerun-ci - retrigger a PR's CI by pushing an empty "re-run ci test" commit
+# to its head branch. Bound to `R` in ~/.config/gh-dash/config.yml.
+#
+# An empty commit (no file changes, just a fresh SHA) is the most reliable way to
+# re-run the whole CI pipeline from scratch when a check flaked: it re-fires every
+# workflow on `push`/`pull_request`, unlike `gh run rerun` which only retries the
+# jobs of one existing run.
+#
+# Mirrors ghme-checkout's contract: operate in the dir ghme was launched from,
+# bring the branch to its latest remote commit first, and refuse to push from a
+# diverged or dirty tree rather than risk clobbering work. `gh pr checkout`
+# fetches the PR head and sets push tracking even for fork PRs, so a later bare
+# `git push` lands on the right remote branch.
+#
+# Usage: ghme-rerun-ci <pr-number> <head-ref-name>
+set -uo pipefail
+
+pr="${1:?usage: ghme-rerun-ci <pr-number> <head-ref-name>}"
+head="${2:-}"
+dir="${GHME_LAUNCH_DIR:-$PWD}"
+msg="re-run ci test"
+
+# gh-dash repaints its full-screen UI the instant this command exits, painting
+# over anything printed here, so pause to let the report be read first. Always
+# exit 0 on a handled problem, or gh-dash shows a generic "got an error" box
+# instead of the explanation below.
+pause() { printf '\nPress Enter to return to ghme '; read -r _ || true; }
+
+cd "$dir" 2>/dev/null || { echo "ghme-rerun-ci: can't enter '$dir'." >&2; pause; exit 0; }
+
+# Bring the PR branch into this clone at its latest remote commit. If gh refuses
+# (local branch diverged, or the working tree is dirty) we stop here rather than
+# build a commit on top of an unexpected state.
+if ! GH_PAGER=cat gh pr checkout "$pr"; then
+  echo
+  echo "x  Couldn't check out PR #$pr ('$head') cleanly: the local branch has"
+  echo "   diverged from the remote, or the working tree is dirty. Sort that out"
+  echo "   first; ghme won't push an empty commit from an unknown state."
+  pause
+  exit 0
+fi
+
+if ! git commit --allow-empty -m "$msg"; then
+  echo
+  echo "x  Couldn't create the empty commit (see the error above)."
+  pause
+  exit 0
+fi
+
+# Bare push: gh pr checkout already pointed this branch at the PR's head remote
+# (origin, or the fork it lives on), so this retriggers CI on the right branch.
+if GH_PAGER=cat git push; then
+  echo
+  echo ">  Pushed an empty '$msg' commit to '$head'. CI will re-run from scratch."
+else
+  echo
+  echo "x  Empty commit made locally but the push failed: you may not have push"
+  echo "   access to this PR's branch, or it has no upstream set."
+  echo "   Undo the local commit with:   git reset --hard HEAD~1"
+fi
+pause
+exit 0

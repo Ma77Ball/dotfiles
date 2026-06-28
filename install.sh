@@ -70,6 +70,7 @@ declare -A PKGMAP=(
     [go]="dnf:golang apt:golang-go pacman:go zypper:go apk:go"
     [gh]="dnf:gh apt:gh pacman:github-cli zypper:gh apk:github-cli"
     [jq]="dnf:jq apt:jq pacman:jq zypper:jq apk:jq"
+    [lazygit]="dnf:lazygit pacman:lazygit zypper:lazygit apk:lazygit"
     [gcc]="dnf:gcc apt:gcc pacman:gcc zypper:gcc apk:gcc"
     [gpp]="dnf:gcc-c++ apt:g++ pacman:gcc zypper:gcc-c++ apk:g++"
     [make]="dnf:make apt:make pacman:make zypper:make apk:make"
@@ -115,6 +116,8 @@ echo "--- Installing packages (manager: ${PM:-none}) ---"
 #                             (ghme) from their vendored source under dotfiles/
 #   gh                     -- GitHub CLI; ghme wraps `gh dash`
 #   jq                     -- ghme-comments parses the GitHub API with jq
+#   lazygit                -- git TUI opened from nvim with <leader>gg
+#                             (no Debian/Ubuntu apt package; install manually there)
 #   cc + g++ + make        -- nvim-treesitter compiles each language parser from
 #                             C/C++ on first use (:TSUpdate / auto_install). With
 #                             no compiler, parsers silently fail to build and
@@ -136,6 +139,7 @@ TOOLS=(
     "go:go"
     "gh:gh"
     "jq:jq"
+    "lazygit:lazygit"
     "cc:gcc"
     "g++:gpp"
     "make:make"
