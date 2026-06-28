@@ -1,3 +1,5 @@
+-- nvim-lspconfig + Mason: install and configure LSP servers (lua/python/ts/html).
+-- jdtls is excluded here; nvim-jdtls starts it (ftplugin/java.lua).
 return {
   {
     "neovim/nvim-lspconfig",
@@ -7,11 +9,7 @@ return {
       "mason-org/mason-lspconfig.nvim",
     },
     config = function()
-      -- Neovim 0.11 ships with virtual_text OFF by default, so LSP diagnostics
-      -- (e.g. ts_ls's "'}' expected" syntax errors) only appear as a faint gutter
-      -- sign + underline -- easy to miss, and invisible when the error lands on a
-      -- blank line at EOF. Turn the inline message back on so these errors are
-      -- actually readable in the buffer.
+      -- Nvim 0.11 hides diagnostics inline by default; turn virtual_text back on
       vim.diagnostic.config({
         virtual_text = {
           spacing = 2,
@@ -33,7 +31,7 @@ return {
       local lspconfig = require("lspconfig")
       local cmp_nvim_lsp = require("cmp_nvim_lsp")
 
-      -- Advertise capabilities for nvim-cmp
+      -- advertise nvim-cmp completion capabilities to servers
       local capabilities = cmp_nvim_lsp.default_capabilities()
 
       mason_lspconfig.setup({
@@ -45,20 +43,19 @@ return {
           "html",
           "jdtls", -- installed by Mason, but started/configured by nvim-jdtls (see ftplugin/java.lua)
         },
-        -- jdtls needs special handling (per-project workspace, debug/test bundles, Java 21+
-        -- runtime), so let nvim-jdtls launch it instead of mason-lspconfig auto-enabling it.
+        -- let nvim-jdtls launch jdtls instead of auto-enabling it here
         automatic_enable = {
           exclude = { "jdtls" },
         },
         handlers = {
-          -- Default handler for installed servers
+          -- default handler for installed servers
           function(server_name)
             lspconfig[server_name].setup({
               capabilities = capabilities,
             })
           end,
 
-          -- Targeted overrides for specific servers
+          -- per-server overrides
           ["lua_ls"] = function()
             lspconfig.lua_ls.setup({
               capabilities = capabilities,

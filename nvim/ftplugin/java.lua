@@ -1,5 +1,4 @@
--- Per-buffer JDTLS (Eclipse Java language server) startup.
--- Runs for every Java file. nvim-jdtls is loaded via `ft = "java"`.
+-- Per-buffer JDTLS (Eclipse Java language server) startup for every Java file.
 
 local ok, jdtls = pcall(require, "jdtls")
 if not ok then
@@ -9,15 +8,14 @@ end
 local mason = vim.fn.stdpath("data") .. "/mason"
 local jdtls_pkg = mason .. "/packages/jdtls"
 
--- JDTLS itself must run on Java 21+. The system "java" here may be older (11 via
--- SDKMAN), so resolve an explicit JDK 21+ launcher. Falls back to PATH "java".
+-- Resolve an explicit JDK 21+ launcher (JDTLS requires Java 21+); falls back to PATH "java".
 local function resolve_java21()
   local candidates = {
     "/usr/lib/jvm/java-21-openjdk/bin/java",
     "/usr/lib/jvm/java-25-openjdk/bin/java",
     vim.env.JDTLS_JAVA_HOME and (vim.env.JDTLS_JAVA_HOME .. "/bin/java") or nil,
   }
-  -- Pick up any /usr/lib/jvm/java-2x* install as a last resort.
+  -- Fall back to any /usr/lib/jvm/java-2x* install.
   for _, p in ipairs(vim.fn.glob("/usr/lib/jvm/java-2*/bin/java", true, true)) do
     table.insert(candidates, p)
   end
@@ -36,7 +34,7 @@ local launcher = vim.fn.glob(jdtls_pkg .. "/plugins/org.eclipse.equinox.launcher
 -- OS-specific config directory shipped with jdtls.
 local config_dir = jdtls_pkg .. "/config_linux"
 
--- Resolve the project root and give each project its own workspace.
+-- Resolve the project root; give each project its own workspace dir.
 local root_markers = { "gradlew", "mvnw", "pom.xml", "build.gradle", "settings.gradle", ".git" }
 local root_dir = jdtls.setup.find_root(root_markers)
 if not root_dir or root_dir == "" then
@@ -90,8 +88,7 @@ local config = {
       maven = { downloadSources = true },
       signatureHelp = { enabled = true },
       contentProvider = { preferred = "fernflower" },
-      -- JDKs available for projects to target. The build tool / .java-version
-      -- selects which one a project compiles against.
+      -- JDK runtimes projects can target.
       configuration = {
         runtimes = {
           { name = "JavaSE-11", path = "/usr/lib/jvm/temurin-11-jdk" },
@@ -105,7 +102,7 @@ local config = {
     bundles = bundles,
   },
   on_attach = function(_, bufnr)
-    -- Wire up nvim-dap: discover main classes and enable hot-code-replace.
+    -- Wire nvim-dap: discover main classes, enable hot-code-replace.
     require("jdtls.dap").setup_dap_main_class_configs()
     jdtls.setup_dap({ hotcodereplace = "auto" })
 

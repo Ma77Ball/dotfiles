@@ -1,9 +1,8 @@
 #!/bin/bash
-
-# Exit immediately if a command exits with a non-zero status
+# Install the dotfiles: detect the package manager, install dependencies, symlink
+# configs and bin commands, and build the vendored Go tools.
 set -e
 
-# Get the absolute directory of the current script
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Setting up dotfiles from $DIR..."
@@ -14,7 +13,7 @@ mkdir -p "$HOME/.local/share/applications"
 mkdir -p "$HOME/.bashrc.d"
 mkdir -p "$HOME/.local/bin"
 
-# Function to safely create symlinks
+# Create a symlink, backing up any existing non-symlink target to .bak.
 create_symlink() {
     local source=$1
     local target=$2
@@ -39,10 +38,7 @@ create_symlink() {
 # ---------------------------------------------------------------------------
 # Cross-distro package management
 # ---------------------------------------------------------------------------
-# Detect the system package manager and install packages by a *generic* name,
-# mapping each to the right per-distro package. Supports Fedora/RHEL (dnf),
-# Debian/Ubuntu (apt), Arch (pacman), openSUSE (zypper) and Alpine (apk), so the
-# same install.sh brings up any Linux box.
+# Detect the package manager: dnf, apt-get, pacman, zypper, or apk.
 PM=""
 for m in dnf apt-get pacman zypper apk; do
     if command -v "$m" > /dev/null 2>&1; then
@@ -50,15 +46,13 @@ for m in dnf apt-get pacman zypper apk; do
         break
     fi
 done
-# Short, stable key used in the package map below.
+# Short key used in the package map below.
 case "$PM" in
     apt-get) PMKEY="apt" ;;
     *)       PMKEY="$PM" ;;
 esac
 
-# generic-name -> "mgr:package" for every supported manager. A generic name with
-# no entry for the current manager means "install manually" (reported, never
-# fatal).
+# generic-name -> "mgr:package" per manager (no entry = install manually).
 declare -A PKGMAP=(
     [neovim]="dnf:neovim apt:neovim pacman:neovim zypper:neovim apk:neovim"
     [imagemagick]="dnf:ImageMagick apt:imagemagick pacman:imagemagick zypper:ImageMagick apk:imagemagick"
@@ -105,29 +99,8 @@ pkg_install() {
 }
 
 echo "--- Installing packages (manager: ${PM:-none}) ---"
-# Runtime dependencies, as "command:generic-package" pairs:
-#   neovim                 -- the editor
-#   ImageMagick (magick)   -- image.nvim renders images via the magick CLI
-#   ffmpeg                 -- image.nvim extracts a video preview frame
-#   ripgrep (rg)           -- telescope live-grep / general search
-#   nodejs + npm           -- claudecode.nvim and many LSP/Mason servers
-#   git                    -- gitsigns, diffview, git-conflict, neo-tree git
-#   go                     -- builds msgme, todome, and the patched gh-dash
-#                             (ghme) from their vendored source under dotfiles/
-#   gh                     -- GitHub CLI; ghme wraps `gh dash`
-#   jq                     -- ghme-comments parses the GitHub API with jq
-#   lazygit                -- git TUI opened from nvim with <leader>gg
-#                             (no Debian/Ubuntu apt package; install manually there)
-#   cc + g++ + make        -- nvim-treesitter compiles each language parser from
-#                             C/C++ on first use (:TSUpdate / auto_install). With
-#                             no compiler, parsers silently fail to build and
-#                             treesitter highlighting/indent is "missing".
-#   javac (a JDK)          -- jdtls (Java LSP) and java-debug-adapter need a JDK
-#                             to run; Mason can't make Java debugging work without
-#                             one. Only installed if no `javac` is already on PATH
-#                             (e.g. a sdkman-managed JDK already satisfies this).
-# Each is installed only if its command is missing; failures are reported but
-# never abort the script.
+# Runtime deps as "command:generic-package" pairs; installed only if the command
+# is missing. Failures are reported, never fatal.
 TOOLS=(
     "nvim:neovim"
     "magick:imagemagick"
@@ -170,7 +143,7 @@ else
 fi
 
 echo "--- Installing fonts ---"
-# JetBrains Mono is the terminal font (ghostty/config).
+# Install JetBrains Mono, the terminal font (ghostty/config).
 if fc-list 2>/dev/null | grep -qi "jetbrains mono"; then
     echo "JetBrains Mono already installed."
 elif [ -n "$PM" ]; then
@@ -186,8 +159,7 @@ else
 fi
 
 echo "--- Installing Ghostty terminal ---"
-# Ghostty is in Fedora and Arch repos; elsewhere fall back to Flatpak or a manual
-# note. Best-effort: never abort the script.
+# Install Ghostty: native package on Fedora/Arch, else Flatpak. Best-effort.
 if command -v ghostty > /dev/null 2>&1; then
     echo "Ghostty already installed."
 else
@@ -207,11 +179,7 @@ else
 fi
 
 echo "--- Installing bin commands ---"
-# Personal CLI commands in dotfiles/bin -> ~/.local/bin, as SYMLINKS (not copies)
-# so editing the live command edits the repo file directly and the change syncs
-# across machines. This includes texera_start and the ghme toolchain (ghme,
-# ghme-browser, ghme-checkout, ghme-comments, ghme-rebuild). msgme is a compiled
-# binary, built separately below.
+# Symlink each command in dotfiles/bin into ~/.local/bin.
 if [ -d "$DIR/bin" ]; then
     for script in "$DIR"/bin/*; do
         [ -f "$script" ] || continue
@@ -231,23 +199,15 @@ echo "--- Configuring ghme (gh-dash) ---"
 create_symlink "$DIR/gh-dash" "$HOME/.config/gh-dash"
 
 echo "--- Configuring msgme ---"
-# msgme reads ~/.config/msgme/config.yml. The committed config has a blank Slack
-# token; set the real one via the SLACK_TOKEN env var (export it yourself, e.g.
-# in ~/.bashrc). msgme prefers SLACK_TOKEN over the file, so no secret is ever
-# committed to this public repo.
+# msgme reads ~/.config/msgme/config.yml; set the Slack token via $SLACK_TOKEN.
 create_symlink "$DIR/msgme-config" "$HOME/.config/msgme"
 
 echo "--- Configuring shell (Ghostty git-branch title) ---"
-# ~/.bashrc.d/*.sh is auto-sourced by the loader below (Fedora's default
-# ~/.bashrc already sources ~/.bashrc.d). This sets the Ghostty window title to
-# the current git branch (see ghostty/config).
+# Auto-sourced from ~/.bashrc.d/ by the loader below.
 create_symlink "$DIR/bashrc.d/ghostty-title.sh" "$HOME/.bashrc.d/ghostty-title.sh"
 
 echo "--- Ensuring ~/.bashrc loads ~/.local/bin and ~/.bashrc.d ---"
-# Fedora's stock ~/.bashrc already puts ~/.local/bin on PATH and sources
-# ~/.bashrc.d/*. On distros that don't (Debian/Ubuntu/Arch/Alpine), append an
-# idempotent, marker-guarded block so the same setup works everywhere. Skip if
-# ~/.bashrc already sources ~/.bashrc.d, to avoid double-sourcing.
+# Append a PATH + ~/.bashrc.d loader to ~/.bashrc unless it already sources it.
 BRC="$HOME/.bashrc"
 touch "$BRC"
 if grep -q '\.bashrc\.d' "$BRC"; then
@@ -275,8 +235,7 @@ case ":$PATH:" in
 esac
 
 echo "--- Building msgme ---"
-# msgme: a terminal dashboard for your messages (Slack/Outlook/Teams/Calendar).
-# Source is vendored under dotfiles/msgme so it builds anywhere with Go.
+# msgme: terminal messages dashboard, built from vendored source.
 if [ -d "$DIR/msgme" ]; then
     if command -v go > /dev/null 2>&1; then
         if ( cd "$DIR/msgme" && go build -o "$HOME/.local/bin/msgme" . ); then
@@ -290,11 +249,8 @@ if [ -d "$DIR/msgme" ]; then
 fi
 
 echo "--- Building ghme (patched gh-dash) ---"
-# ghme wraps `gh dash`. The full patched gh-dash source is vendored under
-# dotfiles/ghme (like dotfiles/msgme), so it builds anywhere with Go: no upstream
-# clone, no network, no patch step. ghme-rebuild compiles that source and installs
-# it as the `gh dash` extension binary (creating the extension registration if
-# needed). gh itself is only needed at runtime (auth + the keybinding commands).
+# ghme-rebuild compiles the vendored gh-dash source and installs it as the `gh
+# dash` extension binary. gh is only needed at runtime.
 if [ -d "$DIR/ghme" ] && [ -f "$DIR/ghme/go.mod" ]; then
     if command -v go > /dev/null 2>&1; then
         echo "  building the patched gh-dash binary (ghme-rebuild)..."
@@ -308,10 +264,7 @@ else
 fi
 
 echo "--- Building todome ---"
-# todome: a terminal todo tracker (add/edit/prioritize/complete tasks), built on
-# the same Bubbletea/gh-dash look as msgme. Source is vendored under
-# dotfiles/todome so it builds anywhere with Go. Tasks persist to
-# ~/.local/share/todome/tasks.json; no config or login is needed.
+# todome: terminal todo tracker, built from vendored source; no config needed.
 if [ -d "$DIR/todome" ] && [ -f "$DIR/todome/go.mod" ]; then
     if command -v go > /dev/null 2>&1; then
         if ( cd "$DIR/todome" && go build -o "$HOME/.local/bin/todome" . ); then
@@ -336,8 +289,7 @@ for desktop_file in "$DIR"/custom_apps/*.desktop; do
 
         echo "Processing $filename..."
 
-        # Ensure we dynamically replace hardcoded paths found in earlier templates
-        # Default user `matthew` and hardcoded dotfiles path are replaced with dynamic ones
+        # Rewrite hardcoded /home/<user>/dotfiles and /home/<user> paths to $DIR/$HOME.
         sed -e "s|/home/[^/]*/dotfiles|$DIR|g" \
             -e "s|/home/[^/]*|$HOME|g" \
             "$desktop_file" > "$target"

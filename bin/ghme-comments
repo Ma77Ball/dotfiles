@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-# ghme-comments — render a PR/issue conversation in a clean, human-readable layout.
-# Used by the `v` keybinding in ghme (gh-dash). Pages the output unless captured.
-#
-# For PRs this shows three sections the gh-dash preview pane can't lay out well:
-#   1. Reviews          — APPROVED / CHANGES_REQUESTED / commented, with a badge.
-#   2. Code review      — inline comments grouped by file, threaded by reply,
-#                         each with a few lines of diff context.
-#   3. Conversation     — the top-level issue comments.
-# Issues just show the description + conversation.
-#
+# ghme-comments - render a PR/issue conversation in a readable layout, paged on a
+# TTY. PRs show Reviews, inline Code review (grouped by file, threaded), and
+# Conversation; issues show description + conversation. Bound to `v` in ghme.
 # Usage: ghme-comments pr|issue <number> <owner/repo>
 set -euo pipefail
 
@@ -22,7 +15,7 @@ case "$kind" in
   *) echo "ghme-comments: first arg must be 'pr' or 'issue'" >&2; exit 2 ;;
 esac
 
-# Width: fit the terminal but never go painfully wide.
+# Width: fit the terminal, capped at 100 cols, floored at 40.
 cols=$(tput cols 2>/dev/null || echo 80)
 width=$(( cols > 100 ? 100 : cols ))
 (( width < 40 )) && width=40
@@ -55,7 +48,7 @@ ago() { # ISO-8601 -> "3 days ago"
 
 rule() { printf '%s%s%s\n' "$dim" "$(printf '─%.0s' $(seq 1 "$width"))" "$reset"; }
 
-# A section heading: a bold bar + label, set off with a blank line above.
+# Print a section heading: a bold bar + label.
 section() { printf '\n%s%s▌ %s%s\n' "$bold" "$magenta" "$1" "$reset"; }
 
 # Print a body block: strip CRs, collapse blank runs, word-wrap, indent by $2.
@@ -80,8 +73,7 @@ reactions() {
 
 # Print one author header + body + reactions.
 #   card <login> <assoc> <when> <reactionsJSON> <body> [pad] [arrow]
-# pad indents the whole card (for threaded replies); arrow is a glyph printed
-# before @author (e.g. "↳ " for a reply).
+# pad indents the card (threaded replies); arrow prefixes @author (e.g. "↳ ").
 card() {
   local login="$1" assoc="$2" when="$3" react="$4" body="$5" pad="${6:-}" arrow="${7:-}"
   local badge="" relt; relt=$(ago "$when")
@@ -100,8 +92,8 @@ card() {
   [[ -n "$rsum" ]] && printf '\n%s  %s%s%s\n' "$pad" "$dim" "$rsum" "$reset"
 }
 
-# Show a few lines of diff context (the tail of a review comment's diff_hunk),
-# colored like a diff, truncated to the terminal width, indented by $2.
+# Print the tail of a review comment's diff_hunk as colored, width-truncated
+# diff context, indented by $2.
 render_hunk() {
   local hunk="$1" pad="${2:-  }"; local maxw=$(( width - ${#pad} - 2 ))
   (( maxw < 20 )) && maxw=20
@@ -116,7 +108,7 @@ render_hunk() {
   done
 }
 
-# One API round-trip for the body + top-level comments (+ reviews for PRs).
+# Fetch body + top-level comments (+ reviews for PRs).
 if [[ "$kind" == pr ]]; then
   fields="number,title,author,body,createdAt,state,comments,reviews"
 else
@@ -125,7 +117,7 @@ fi
 meta=$("${cmd[@]}" --json "$fields" 2>/dev/null) || {
   echo "ghme-comments: couldn't load $kind #$number from $repo" >&2; exit 1; }
 
-# Inline review comments (PRs only) — a separate REST endpoint. Compact JSON.
+# Inline review comments (PRs only): a separate REST endpoint.
 inline='[]'
 if [[ "$kind" == pr ]]; then
   inline=$(gh api "repos/$repo/pulls/$number/comments" --paginate 2>/dev/null) || inline='[]'
@@ -133,8 +125,8 @@ if [[ "$kind" == pr ]]; then
 fi
 
 render_reviews() {
-  # Skip "COMMENTED" reviews whose body is empty — they're just containers for
-  # the inline comments rendered in the next section, so they'd be noise here.
+  # Skip empty "COMMENTED" reviews: just containers for the inline comments
+  # rendered in the next section.
   local rows; rows=$(jq -r '
     (.reviews // [])[]
     | select((.state != "COMMENTED") or ((.body // "" | gsub("\\s";"")) != ""))
@@ -165,7 +157,7 @@ render_reviews() {
 render_inline() {
   local n; n=$(jq 'length' <<<"$inline")
   (( n == 0 )) && return 0
-  # Order: top-level comments by (file, time), each followed by its replies.
+  # Order top-level comments by (file, time), each followed by its replies.
   local rows; rows=$(jq -r '
     . as $all
     | [ .[] | select(.in_reply_to_id == null) ]

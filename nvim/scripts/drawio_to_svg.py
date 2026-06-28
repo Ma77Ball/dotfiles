@@ -1,19 +1,8 @@
-"""Render a .drawio file to one SVG per page — no drawio engine required.
-
-drawio files are mxGraph XML; the official renderers are all GUI/web. This is a
-small, dependency-free converter that understands the subset of mxGraph this
-repo's diagrams use (rounded rects, notes, ellipses, text, orthogonal edges
-with arrowheads + labels) and emits plain SVG. SVG renders anywhere: a browser,
-`inkscape`/`magick`, or inline in a terminal that supports images
-(e.g. ghostty + image.nvim).
-
-    python scripts/drawio_to_svg.py docs/pipeline.drawio        # -> docs/pipeline-<page>.svg
-    python scripts/drawio_to_svg.py docs/pipeline.drawio --png  # also rasterize via magick/inkscape
-
-Then view a page, e.g.:
-    magick display docs/pipeline-2-current-pipeline.png
-    # or in nvim with image.nvim: :lua require('image').from_file('...'):render()
-"""
+# Render a .drawio file (mxGraph XML) to one SVG per page.
+# Supports: rounded rects, notes, ellipses, text, orthogonal edges with labels.
+#   python scripts/drawio_to_svg.py docs/pipeline.drawio        # -> docs/pipeline-<page>.svg
+#   python scripts/drawio_to_svg.py docs/pipeline.drawio --png  # also rasterize via magick/inkscape
+"""drawio_to_svg: render a .drawio file to one SVG per page."""
 
 from __future__ import annotations
 

@@ -1,6 +1,4 @@
-// Command msgme is a terminal dashboard of your messages across sources
-// (Slack today; Outlook, Google Calendar, and Microsoft Teams planned),
-// modeled on the structure of ghme/gh-dash.
+// Command msgme is a terminal dashboard of messages across sources.
 package main
 
 import (
@@ -71,6 +69,7 @@ func main() {
 	runTUI()
 }
 
+// runInit writes a starter config if none exists.
 func runInit() {
 	path, created, err := config.WriteDefault()
 	if err != nil {
@@ -83,8 +82,7 @@ func runInit() {
 	}
 }
 
-// build returns the connected sources from config, plus any setup errors keyed
-// by source name (so callers can attach the message to that source's tab).
+// build returns connected sources plus setup errors keyed by source name.
 func build(ctx context.Context, cfg config.Config) ([]sources.Source, map[string]error) {
 	var srcs []sources.Source
 	warns := map[string]error{}
@@ -112,10 +110,8 @@ func build(ctx context.Context, cfg config.Config) ([]sources.Source, map[string
 	return srcs, warns
 }
 
-// setupTabs returns a placeholder tab for every known provider that did not
-// connect, so the dashboard always shows one tab per app (like gh-dash). When a
-// provider was enabled but errored, its real error is shown above the generic
-// instructions.
+// setupTabs returns a placeholder tab for each unconnected provider, prepending
+// any setup error.
 func setupTabs(srcs []sources.Source, warns map[string]error) []sources.Section {
 	have := map[string]bool{}
 	for _, s := range srcs {
@@ -137,7 +133,7 @@ func setupTabs(srcs []sources.Source, warns map[string]error) []sources.Section 
 	return tabs
 }
 
-// runLogin runs the interactive OAuth flow for a source and caches the token.
+// runLogin runs the interactive OAuth flow for a source.
 func runLogin(args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: msgme login <ms|google|slack>")
@@ -170,7 +166,7 @@ func runLogin(args []string) {
 	}
 }
 
-// openBrowser opens a URL in the user's browser for the loopback login flow.
+// openBrowser opens a URL via $BROWSER or xdg-open.
 func openBrowser(url string) {
 	bin := os.Getenv("BROWSER")
 	if bin == "" {
@@ -181,6 +177,7 @@ func openBrowser(url string) {
 	go func() { _ = c.Wait() }()
 }
 
+// runDoctor reports the config path and each source's status and sections.
 func runDoctor() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -205,14 +202,14 @@ func runDoctor() {
 	}
 }
 
+// runTUI launches the dashboard.
 func runTUI() {
 	cfg, err := config.Load()
 	if err != nil {
 		fail(err)
 	}
 	srcs, warns := build(context.Background(), cfg)
-	// Always launch: providers that did not connect become setup tabs whose body
-	// explains how to connect them, so msgme is useful even with no token set.
+	// Unconnected providers become setup tabs so the dashboard always launches.
 	tabs := setupTabs(srcs, warns)
 
 	refresh := time.Duration(cfg.RefreshMinutes) * time.Minute
@@ -223,6 +220,7 @@ func runTUI() {
 	}
 }
 
+// fail prints err and exits non-zero.
 func fail(err error) {
 	fmt.Fprintf(os.Stderr, "msgme: %v\n", err)
 	os.Exit(1)

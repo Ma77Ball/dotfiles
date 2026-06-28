@@ -14,12 +14,11 @@ return {
         },
       })
 
-      -- Resolve / navigate conflicts (active only in buffers with conflicts)
+      -- Resolve / navigate conflicts.
       local function map(lhs, rhs, desc)
         vim.keymap.set("n", lhs, rhs, { desc = desc })
       end
 
-      -- <leader>cb is taken by Claude (add file), so "both" uses capital cB
       map("<leader>co", "<Plug>(git-conflict-ours)", "Conflict: choose ours")
       map("<leader>ct", "<Plug>(git-conflict-theirs)", "Conflict: choose theirs")
       map("<leader>cB", "<Plug>(git-conflict-both)", "Conflict: choose both")
@@ -27,10 +26,7 @@ return {
       map("]x", "<Plug>(git-conflict-next-conflict)", "Conflict: next")
       map("[x", "<Plug>(git-conflict-prev-conflict)", "Conflict: prev")
 
-      -- Step through merge-conflicted files one by one.
-      -- Builds a quickfix list of every unmerged file (positioned at its first
-      -- conflict marker) and drops you straight INTO the first one, in the real
-      -- editable file buffer -- so the resolve keys above work immediately.
+      -- quickfix-list all unmerged files (at first marker) and jump to the first
       local function conflict_step()
         local root = vim.trim(vim.fn.system({ "git", "rev-parse", "--show-toplevel" }))
         if vim.v.shell_error ~= 0 then
@@ -69,8 +65,7 @@ return {
       map("]q", "<cmd>cnext<cr>", "Conflict: next file")
       map("[q", "<cmd>cprev<cr>", "Conflict: prev file")
 
-      -- Stage the current (resolved) file with `git add` and jump to the next
-      -- conflicted file. Refuses to stage if conflict markers are still present.
+      -- git add the current file (only if no markers remain), then go to next
       local function conflict_stage()
         local file = vim.fn.expand("%:p")
         if file == "" then

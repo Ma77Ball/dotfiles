@@ -1,15 +1,5 @@
-// Package slack implements sources.Source for Slack using a user OAuth token.
-//
-// Required token scopes (Slack app -> "User Token Scopes"):
-//
-//	im:read, im:history        - list and read DMs
-//	channels:history,           - read channel messages you are mentioned in
-//	groups:history, mpim:history
-//	search:read                - find mentions
-//	chat:write                 - reply
-//	users:read                 - resolve user ids to names
-//
-// The token (xoxp-...) comes from config or, preferably, the SLACK_TOKEN env var.
+// Package slack implements sources.Source for Slack using a user OAuth token
+// (xoxp-...) from config or the SLACK_TOKEN env var.
 package slack
 
 import (
@@ -37,11 +27,11 @@ type Source struct {
 	userNames map[string]string // user id -> display name cache
 }
 
-// handle is stashed in Item.Handle so actions know what to act on.
+// handle carries per-item action data.
 type handle struct {
 	Channel  string
-	TS       string // message timestamp (acts as message id and read marker)
-	ThreadTS string // thread root, if the message is in a thread
+	TS       string // message timestamp (id and read marker)
+	ThreadTS string // thread root, if threaded
 }
 
 // New builds a Slack source from a token and the configured section titles.
@@ -56,10 +46,10 @@ func New(token string, sectionTitles []string) (*Source, error) {
 	}, nil
 }
 
+// Name returns the source identifier.
 func (s *Source) Name() string { return "slack" }
 
-// SetupTab returns the placeholder tab the dashboard shows when Slack is not
-// connected, explaining how to get and provide a token.
+// SetupTab returns the placeholder tab shown when Slack is not connected.
 func SetupTab() sources.Section {
 	return sources.Section{Source: "slack", Title: "Slack", Setup: setupHelp}
 }
@@ -82,6 +72,7 @@ Get a user OAuth token (xoxp-…):
 
 Verify any time with:  msgme doctor`
 
+// Sections returns the configured Slack tabs.
 func (s *Source) Sections() []sources.Section {
 	out := make([]sources.Section, 0, len(s.sections))
 	for _, title := range s.sections {
@@ -104,8 +95,7 @@ func (s *Source) Fetch(ctx context.Context, section sources.Section) ([]sources.
 
 // fetchDMs returns unread direct messages, one item per unread DM conversation.
 func (s *Source) fetchDMs(ctx context.Context, section sources.Section) ([]sources.Item, error) {
-	// Populate the team id so permalink() has a fallback (ignore the error: a
-	// missing self only costs us the fallback URL, not the DM list).
+	// populate team id for permalink fallback; error is non-fatal
 	_ = s.ensureSelf(ctx)
 	convs, _, err := s.api.GetConversationsForUserContext(ctx, &slack.GetConversationsForUserParameters{
 		Types: []string{"im"},
@@ -117,8 +107,7 @@ func (s *Source) fetchDMs(ctx context.Context, section sources.Section) ([]sourc
 
 	var items []sources.Item
 	for _, c := range convs {
-		// conversations.info carries the per-user read cursor (LastRead) and,
-		// when Slack populates it, an unread count.
+		// read cursor (LastRead) and unread count, if populated
 		info, err := s.api.GetConversationInfoContext(ctx, &slack.GetConversationInfoInput{
 			ChannelID: c.ID,
 		})
@@ -133,7 +122,7 @@ func (s *Source) fetchDMs(ctx context.Context, section sources.Section) ([]sourc
 			continue
 		}
 		msg := hist.Messages[0]
-		// Unread if Slack says so, or the latest message is newer than the cursor.
+		// unread if Slack says so or the latest message is past the cursor
 		if info.UnreadCountDisplay == 0 && !tsNewer(msg.Timestamp, info.LastRead) {
 			continue
 		}
@@ -226,6 +215,7 @@ func (s *Source) Reply(ctx context.Context, item sources.Item, text string) erro
 
 // --- helpers ---
 
+// ensureSelf caches the auth user's id, handle, and team id.
 func (s *Source) ensureSelf(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -242,9 +232,8 @@ func (s *Source) ensureSelf(ctx context.Context) error {
 	return nil
 }
 
-// permalink returns a clickable web link to a message. chat.getPermalink yields
-// the canonical https URL Slack guarantees opens in the browser or app; if that
-// call fails it falls back to an app.slack.com client URL (needs the team id).
+// permalink returns a web link to a message, falling back to an app.slack.com
+// client URL if the API call fails.
 func (s *Source) permalink(ctx context.Context, channel, ts string) string {
 	link, err := s.api.GetPermalinkContext(ctx, &slack.PermalinkParameters{Channel: channel, Ts: ts})
 	if err == nil && link != "" {
@@ -259,6 +248,7 @@ func (s *Source) permalink(ctx context.Context, channel, ts string) string {
 	return ""
 }
 
+// userName resolves a user id to a display name, caching the result.
 func (s *Source) userName(ctx context.Context, id string) string {
 	if id == "" {
 		return "unknown"
@@ -285,10 +275,12 @@ func (s *Source) userName(ctx context.Context, id string) string {
 	return name
 }
 
+// renderBody formats a message for the preview pane.
 func (s *Source) renderBody(ctx context.Context, who, text string) string {
 	return fmt.Sprintf("**%s**\n\n%s", who, text)
 }
 
+// oneLine collapses text to a single trimmed line capped at 120 chars.
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.TrimSpace(s)
@@ -325,6 +317,7 @@ func tsNewer(a, b string) bool {
 	return af > bf
 }
 
+// sortByTimeDesc sorts items newest first.
 func sortByTimeDesc(items []sources.Item) {
 	sort.Slice(items, func(i, j int) bool { return items[i].Time.After(items[j].Time) })
 }

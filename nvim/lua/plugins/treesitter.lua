@@ -1,9 +1,9 @@
+-- nvim-treesitter: syntax-aware highlighting, indentation, and folding.
 return
 {
 	{
   'nvim-treesitter/nvim-treesitter',
-  -- master is the stable, Nvim 0.11-compatible branch. The newer `main`
-  -- branch requires Neovim 0.12+ (uses vim.list.unique etc.).
+  -- master: the Nvim 0.11-compatible branch.
   branch = 'master',
   lazy = false,
   build = ':TSUpdate',

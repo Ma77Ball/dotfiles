@@ -1,8 +1,5 @@
--- Seamless window navigation: <C-h/j/k/l> moves between nvim splits. Claude now
--- runs as a native in-nvim terminal (see plugins/claude.lua), and the terminal is
--- Ghostty -- which is not a CLI multiplexer -- so there are no external panes to
--- cross into. Multiplexer integration is therefore disabled; these keys move
--- between nvim splits only (the Claude window included, since it's a real split).
+-- smart-splits.nvim: <C-h/j/k/l> navigates between nvim splits.
+-- Multiplexer integration is off (Ghostty has no panes to cross into).
 return {
   {
     "mrjones2014/smart-splits.nvim",

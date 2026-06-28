@@ -1,5 +1,4 @@
--- Scala support via Metals (LSP + debugging in one). Metals is managed by
--- nvim-metals (bootstrapped through coursier), not Mason/lspconfig.
+-- nvim-metals: Scala LSP + debugging via Metals (not Mason/lspconfig).
 return {
   {
     "scalameta/nvim-metals",
@@ -12,7 +11,7 @@ return {
       local metals = require("metals")
       local config = metals.bare_config()
 
-      -- Match completion capabilities with the rest of the config (nvim-cmp).
+      -- Advertise nvim-cmp completion capabilities.
       local ok_cmp, cmp_lsp = pcall(require, "cmp_nvim_lsp")
       if ok_cmp then
         config.capabilities = cmp_lsp.default_capabilities()
@@ -24,7 +23,7 @@ return {
       }
 
       config.on_attach = function(_, bufnr)
-        -- Metals provides debugging directly through nvim-dap.
+        -- Enable Metals debugging through nvim-dap.
         metals.setup_dap()
 
         local map = function(mode, lhs, rhs, desc)
@@ -37,7 +36,7 @@ return {
         map("n", "<leader>cr", vim.lsp.buf.rename, "LSP: rename")
         map("n", "<leader>ca", vim.lsp.buf.code_action, "LSP: code action")
         map("n", "<leader>cf", function() vim.lsp.buf.format({ async = true }) end, "LSP: format")
-        -- Metals command picker (server-provided commands: build import, etc.)
+        -- Metals command picker (build import, etc.)
         map("n", "<leader>mc", function()
           local ok, telescope = pcall(require, "telescope")
           if ok then

@@ -1,5 +1,4 @@
--- Centralised Mason install list for non-LSP tooling (debug adapters, etc.).
--- LSP servers themselves are handled by mason-lspconfig (see lsp.lua).
+-- mason-tool-installer: auto-installs non-LSP Mason tools (debug adapters); LSP servers are in lsp.lua.
 return {
   {
     "WhoIsSethDaniel/mason-tool-installer.nvim",

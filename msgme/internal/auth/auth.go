@@ -1,9 +1,5 @@
-// Package auth provides OAuth2 token persistence and the two interactive login
-// flows msgme needs: device-code (Microsoft) and loopback-localhost (Google).
-//
-// Sources do not log in themselves: at startup they load a cached token
-// (non-interactive). The user runs `msgme login <source>` once to populate the
-// cache; the cached token then auto-refreshes via a caching TokenSource.
+// Package auth handles OAuth2 token persistence and the device-code and
+// loopback-localhost login flows.
 package auth
 
 import (
@@ -19,7 +15,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// tokenDir returns the directory where per-source tokens are cached.
+// tokenDir returns the per-source token cache directory.
 func tokenDir() string {
 	base := os.Getenv("XDG_CONFIG_HOME")
 	if base == "" {
@@ -29,12 +25,12 @@ func tokenDir() string {
 	return filepath.Join(base, "msgme", "tokens")
 }
 
+// tokenPath returns the cache file path for a source.
 func tokenPath(source string) string {
 	return filepath.Join(tokenDir(), source+".json")
 }
 
-// LoadToken reads a cached token for a source. Returns (nil, nil) when none
-// exists yet, so callers can report "run msgme login".
+// LoadToken reads a cached token for a source, returning (nil, nil) when none exists.
 func LoadToken(source string) (*oauth2.Token, error) {
 	data, err := os.ReadFile(tokenPath(source))
 	if os.IsNotExist(err) {
@@ -62,8 +58,7 @@ func SaveToken(source string, tok *oauth2.Token) error {
 	return os.WriteFile(tokenPath(source), data, 0o600)
 }
 
-// cachingSource wraps an oauth2.TokenSource and writes the token back to disk
-// whenever it is refreshed, so the refreshed access token survives restarts.
+// cachingSource wraps a TokenSource and persists the token on refresh.
 type cachingSource struct {
 	source string
 	last   *oauth2.Token
@@ -82,9 +77,8 @@ func (c *cachingSource) Token() (*oauth2.Token, error) {
 	return tok, nil
 }
 
-// Client returns an *http.Client authenticated with the cached token for a
-// source, auto-refreshing and re-persisting it. Returns an error (not a client)
-// if no token is cached yet.
+// Client returns an *http.Client using a source's cached token, auto-refreshing
+// and re-persisting it. Errors if no token is cached.
 func Client(ctx context.Context, source string, cfg *oauth2.Config) (*http.Client, error) {
 	tok, err := LoadToken(source)
 	if err != nil {
@@ -97,9 +91,8 @@ func Client(ctx context.Context, source string, cfg *oauth2.Config) (*http.Clien
 	return oauth2.NewClient(ctx, cs), nil
 }
 
-// DeviceLogin runs the OAuth2 device-authorization flow (Microsoft). It prints
-// the verification URL and user code, polls for completion, then caches the
-// token. The cfg must have Endpoint.DeviceAuthURL set.
+// DeviceLogin runs the OAuth2 device-authorization flow and caches the token.
+// cfg must have Endpoint.DeviceAuthURL set.
 func DeviceLogin(ctx context.Context, source string, cfg *oauth2.Config) error {
 	da, err := cfg.DeviceAuth(ctx)
 	if err != nil {
@@ -121,10 +114,8 @@ func DeviceLogin(ctx context.Context, source string, cfg *oauth2.Config) error {
 	return nil
 }
 
-// LoopbackLogin runs the OAuth2 authorization-code flow with a localhost
-// redirect (Google). It starts a one-shot local server, opens the consent URL,
-// captures the code, exchanges it, and caches the token. cfg.RedirectURL is set
-// to the chosen loopback address automatically.
+// LoopbackLogin runs the OAuth2 authorization-code flow via a one-shot localhost
+// server and caches the token. cfg.RedirectURL is set to the loopback address.
 func LoopbackLogin(ctx context.Context, source string, cfg *oauth2.Config, openBrowser func(string)) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

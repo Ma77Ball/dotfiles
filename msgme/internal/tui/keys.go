@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// keyMap holds the dashboard keybindings, vim-flavored like gh-dash.
+// keyMap holds the dashboard keybindings.
 type keyMap struct {
 	Up       key.Binding
 	Down     key.Binding

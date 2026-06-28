@@ -1,3 +1,4 @@
+-- nvim-cmp: completion engine with LSP/buffer/path sources and LuaSnip snippets.
 return {
   {
     "hrsh7th/nvim-cmp",
@@ -30,7 +31,7 @@ return {
           ["<C-f>"] = cmp.mapping.scroll_docs(4),
           ["<C-Space>"] = cmp.mapping.complete(),
           ["<C-e>"] = cmp.mapping.abort(),
-          ["<CR>"] = cmp.mapping.confirm({ select = true }), -- Accept currently selected item. Set `select` to `false` to only confirm explicitly selected items.
+          ["<CR>"] = cmp.mapping.confirm({ select = true }), -- accept the selected item
           ["<Tab>"] = cmp.mapping(function(fallback)
             if cmp.visible() then
               cmp.select_next_item()

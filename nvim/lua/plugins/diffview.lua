@@ -11,9 +11,8 @@ return {
       "DiffviewFocusFiles",
       "DiffviewFileHistory",
     },
-    -- :DiffUp [ref] -> Diffview against upstream main, or a ref you pass.
-    -- Defined in init (not keys/cmd of the plugin) so it exists at startup;
-    -- it calls DiffviewOpen, which lazy-loads the plugin on first use.
+    -- :DiffUp [ref] -> diff against upstream main (or a given ref).
+    -- Defined in init so the command exists at startup before the plugin loads.
     init = function()
       vim.api.nvim_create_user_command("DiffUp", function(o)
         local base = o.args ~= "" and o.args or nil
@@ -45,9 +44,7 @@ return {
       })
     end,
     keys = {
-      -- Diff the working tree, or with a count, N commits back:
-      --   <leader>gd   -> working tree vs index/HEAD
-      --   3<leader>gd  -> working tree vs HEAD~3
+      -- working tree vs HEAD, or with a count N, vs HEAD~N
       {
         "<leader>gd",
         function()
@@ -56,20 +53,19 @@ return {
         end,
         desc = "Diffview: working tree (or N commits back with a count)",
       },
-      -- Diff against the previous commit.
+      -- diff against the previous commit
       { "<leader>gD", "<cmd>DiffviewOpen HEAD~1<cr>", desc = "Diffview: open vs HEAD~1" },
-      -- Diff against upstream main to see the branch's total changes.
-      -- Fires immediately; run :DiffUp <ref> manually to diff a different ref.
+      -- diff against upstream main (branch's total changes)
       { "<leader>gu", "<cmd>DiffUp<cr>", desc = "Diffview: vs upstream main" },
       { "<leader>gc", "<cmd>DiffviewClose<cr>", desc = "Diffview: close" },
-      -- History: current file, then whole repo/branch.
+      -- file history, then whole repo/branch history
       { "<leader>gh", "<cmd>DiffviewFileHistory %<cr>", desc = "Diffview: file history" },
       { "<leader>gH", "<cmd>DiffviewFileHistory<cr>", desc = "Diffview: repo history" },
     },
     opts = {
       enhanced_diff_hl = true, -- richer in-diff highlighting
       view = {
-        -- Two-column side-by-side for the working-tree and commit views.
+        -- two-column side-by-side; three-way for merges
         default = { layout = "diff2_horizontal" },
         merge_tool = { layout = "diff3_horizontal" },
       },

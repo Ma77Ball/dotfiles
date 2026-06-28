@@ -26,9 +26,8 @@
 #   ./start_app.sh attach             attach to the app tmux logs (Ctrl-b n/p switch, Ctrl-b d detach)
 #   ./start_app.sh                    interactive: pick targets (space-separated)
 #
-# Texera requires JDK 17. This script auto-selects one (sdkman 17* candidate, or
-# $TEXERA_JAVA_HOME) for builds and service launches without changing your shell
-# default. Running on JDK 24+ breaks Hadoop/Iceberg (Subject.getSubject removed).
+# Auto-selects JDK 17 (TEXERA_JAVA_HOME or an sdkman 17*) for builds/launches; JDK
+# 24+ breaks Hadoop/Iceberg (Subject.getSubject removed).
 
 set -uo pipefail
 
@@ -39,9 +38,7 @@ warn() { echo "  ${c_yel}!${c_off} $*"; }
 die()  { echo "${c_red}error:${c_off} $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || die "$1 is required but was not found on PATH"; }
 
-# texera_start operates on the Texera checkout you're standing in: walk up from $PWD for
-# a dir with build.sbt + amber/. This lives in ~/.local/bin (not in any checkout), so it
-# keys off your cwd, not its own location.
+# Find the Texera checkout: walk up from $PWD for a dir with build.sbt + amber/.
 _find_root() {
   local d="$PWD"
   while [[ "$d" != / ]]; do
@@ -58,21 +55,18 @@ INFRA_COMPOSE="$ROOT/file-service/src/main/resources/docker-compose.yml"   # min
 SINGLE_NODE="$ROOT/bin/single-node"                                        # full all-container deployment
 OBS_COMPOSE="$ROOT/bin/observability/docker-compose.yml"                   # obs entry point (includes single-node)
 PG_CONTAINER="texera-dev-postgres"
-PG_IMAGE="docker.io/groonga/pgroonga:4.0.1-debian-15"                      # texera_ddl.sql needs pgroonga; fully-qualified so podman resolves it too
+PG_IMAGE="docker.io/groonga/pgroonga:4.0.1-debian-15"                      # texera_ddl.sql needs pgroonga; FQ name for podman too
 OBS_SERVICES=(otel-collector victorialogs victoriametrics jaeger parca parca-agent)
 OBS_PROFILES="observability-collector,observability-logs,observability-metrics,observability-traces,observability-profiles"
 DEV_BACKENDS=(config-service access-control-service file-service
               workflow-compiling-service computing-unit-managing-service
               texera-web-application computing-unit-master)
-# host ports bound by the sbt-built services + frontend (admin connectors
-# included). Cleared by 'free-ports' and before 'app' starts so a crashed run
-# that orphaned a JVM/ng-serve doesn't wedge the next start with "address in use".
-# Docker-managed infra/db/obs ports are NOT here — those are stopped via compose.
+# Host ports bound by the sbt-built services + frontend. Cleared by 'free-ports'
+# and before 'app' starts so an orphaned JVM/ng-serve can't wedge the rebind.
+# Infra/db/obs ports are not here (stopped via compose).
 APP_PORTS=(8080 8081 8085 2552 8082 8888 9090 9091 9092 9094 9096 4200 1234 3000)
-# ports each launched service binds — FIRST is the liveness/health port, the
-# rest are also cleared when that service is (re)launched so an orphaned holder
-# can't wedge the rebind. computing-unit-master also binds 2552 (pekko remoting
-# seed) besides its 8085 HTTP port.
+# Ports each service binds; FIRST is the health port. All are cleared on
+# (re)launch. computing-unit-master also binds 2552 (pekko remoting seed).
 declare -A SVC_PORTS=(
   [config-service]="9094" [access-control-service]="9096" [file-service]="9092"
   [workflow-compiling-service]="9090 9091" [computing-unit-managing-service]="8888 8082"
@@ -101,10 +95,8 @@ require_jdk17() {
 with_jdk17() { if [[ -n "$JDK17" ]]; then JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" "$@"; else "$@"; fi; }
 
 # ---- Node 24 selection -----------------------------------------------------
-# The frontend needs Node >=24 (frontend/package.json "engines" + Angular 21);
-# the stock /usr/bin/node is often older. Like the JDK pin above, this picks a
-# Node 24 (TEXERA_NODE_HOME, then an nvm v24.*, then any nvm >=24, then the PATH
-# node if it already qualifies) for the frontend WITHOUT changing your shell.
+# The frontend needs Node >=24 (Angular 21). Picks one (TEXERA_NODE_HOME, an nvm
+# v24.*, any nvm >=24, then the PATH node if it qualifies) without changing the shell.
 NODE24_BIN=""
 find_node24() {
   local d v
@@ -134,13 +126,9 @@ require_node24() {
 }
 
 # ---- container engine (docker if its daemon is up, else rootless podman) ----
-# Every container target (db/infra/obs/fresh/single-node) runs on a container
-# engine. We do NOT hard-require docker: a dead docker daemon (e.g. Fedora's
-# firewalld "INVALID_ZONE: docker" bug, which needs sudo to repair) would block
-# every start, including postgres. Rootless podman runs the SAME images with no
-# daemon, no firewalld zone, and no sudo, so we fall back to it automatically.
-# Preference: a REACHABLE docker daemon first (existing volumes/containers live
-# there), else podman. Detection is cached in $CE after the first probe.
+# Prefer a reachable docker daemon (existing volumes/containers live there), else
+# fall back to rootless podman (runs the same images, no daemon/sudo needed).
+# Cached in $CE after the first probe.
 CE=""
 detect_ce() {
   [[ -n "$CE" ]] && return 0
@@ -150,7 +138,7 @@ detect_ce() {
     CE=podman
     [[ -n "${_ce_warned:-}" ]] || { warn "docker daemon unreachable, using rootless podman (no sudo/firewalld needed)"; _ce_warned=1; }
   elif command -v docker >/dev/null 2>&1; then
-    CE=docker   # docker present but daemon down and no podman: let it fail loudly
+    CE=docker   # daemon down and no podman: let it fail loudly
   else
     return 1
   fi
@@ -159,21 +147,17 @@ detect_ce() {
 need_ce() { detect_ce || die "no container engine: start the docker daemon or install podman"; }
 ce()      { need_ce; "$CE" "$@"; }
 
-# `podman compose` drives the external docker-compose provider, which talks to the
-# rootless podman API socket. Unlike `podman run`, that socket is NOT auto-started,
-# so a compose call dies with "connect: no such file or directory" unless we bring
-# it up first (this is why plain `db` works but infra/obs/single-node need this).
-# Starts the per-user podman.socket (or a transient `podman system service`),
-# waits for it, and exports DOCKER_HOST so the provider connects. No-op on docker.
+# `podman compose` needs the rootless podman API socket, which isn't auto-started
+# (unlike `podman run`). Start the per-user podman.socket (or a transient `podman
+# system service`), wait for it, and export DOCKER_HOST. No-op on docker.
 PODMAN_SOCK=""
-# true only if something actually answers on the socket (a stale socket FILE can
-# linger after the unit stops, so testing -S alone is not enough).
+# True only if something actually answers (a stale socket file can linger).
 podman_sock_live() { podman --remote --url "unix://$1" version >/dev/null 2>&1; }
 ensure_podman_socket() {
   [[ "$CE" == podman ]] || return 0
   local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
   if ! podman_sock_live "$sock"; then
-    # idempotent: re-binds the listener even if a stale socket file is present
+    # idempotent: re-binds even with a stale socket file present
     systemctl --user start podman.socket >/dev/null 2>&1 \
       || { podman system service --time=0 "unix://$sock" >/dev/null 2>&1 & }
     local i; for i in $(seq 1 25); do podman_sock_live "$sock" && break; sleep 0.2; done
@@ -190,14 +174,10 @@ launcher() { find "$ROOT" -maxdepth 5 -type f -path "*/target/*/bin/$1" ! -path 
 have_container() { detect_ce >/dev/null 2>&1 || return 1; "$CE" ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$1"; }
 running_container() { detect_ce >/dev/null 2>&1 || return 1; "$CE" ps --format '{{.Names}}' 2>/dev/null | grep -qx "$1"; }
 
-# Wait for lakeFS to actually serve before we launch backends. file-service runs
-# LakeFSStorageClient.healthCheck at boot and exit(1)s if lakeFS isn't reachable
-# (FileService.scala). 'docker compose up -d' for infra returns BEFORE lakeFS is
-# serving, so a back-to-back app start (fresh/dev/refresh) races it and
-# file-service crashes, :9092 goes down, and the UI's /api/dataset/create gets
-# ECONNREFUSED ("dataset creation failed"). Poll :8000/_health; warn (don't die)
-# if it never comes, so callers without infra aren't blocked hard.
-# poll :8000/_health up to $1 seconds (default 60); 0 once healthy, 1 on timeout.
+# Wait for lakeFS to serve before launching backends: file-service health-checks
+# it at boot and exit(1)s if unreachable, and `compose up -d` returns before
+# lakeFS is ready, so a back-to-back app start races it.
+# Poll :8000/_health up to $1 seconds (default 60); 0 if healthy, 1 on timeout.
 _lakefs_health_wait() {
   command -v curl >/dev/null 2>&1 || { port_open 8000 && return 0 || return 1; }
   local i; for i in $(seq 1 "${1:-60}"); do
@@ -209,10 +189,8 @@ _lakefs_health_wait() {
 wait_for_lakefs() {
   printf "  waiting for lakeFS health (:8000)"
   _lakefs_health_wait 30 && { echo; ok "lakeFS healthy (:8000)"; return 0; }
-  # Up-but-wedged lakeFS never self-recovers: a crash/restart loop, or a container
-  # detached from its docker network after a docker<->podman engine swap (then it
-  # can't resolve `postgres` for its KV store). Recreate the infra stack ONCE and
-  # re-poll: idempotent, keeps named volumes, only runs when already unhealthy.
+  # A wedged lakeFS never self-recovers (crash loop, or detached from its network
+  # after a docker<->podman swap). Recreate infra once and re-poll; keeps volumes.
   echo; warn "lakeFS not healthy after 30s, recreating infra (likely a wedged container)"
   dc "$INFRA_COMPOSE" up -d --force-recreate >/dev/null 2>&1
   printf "  re-waiting for lakeFS health (:8000)"
@@ -222,7 +200,7 @@ wait_for_lakefs() {
 }
 
 # ---- port clearing ---------------------------------------------------------
-# pids LISTENing on a TCP port — prefer lsof, fall back to ss, then to nothing.
+# PIDs listening on a TCP port; prefer lsof, fall back to ss.
 pids_on_port() {
   local p="$1"
   if command -v lsof >/dev/null 2>&1; then
@@ -259,10 +237,8 @@ rebuild() {
   local mode="${1:-}"
   local -a cmds=(); [[ -n "$mode" ]] && cmds+=("$mode"); cmds+=(dist)
   say "sbt ${cmds[*]} (JDK 17) — this takes a few minutes…"
-  # betterproto prints its progress ("Writing __init__.py", ...) to stderr, which
-  # sbt's ProcessLogger tags as [error] even on a clean run. Relabel just those
-  # lines to [info] so a successful rebuild doesn't look like it failed. pipefail
-  # (set at top) preserves sbt's real exit status, so genuine failures still die.
+  # betterproto writes progress to stderr, which sbt tags [error] on a clean run.
+  # Relabel those to [info]; pipefail preserves sbt's real exit status.
   with_jdk17 sbt "${cmds[@]}" 2>&1 \
     | sed -uE 's/^\[error\] (Writing )/[info] \1/' \
     || die "sbt dist failed"
@@ -281,41 +257,26 @@ ensure_built() {
 }
 
 # ---- fresh (from-scratch install test) -------------------------------------
-# Simulates a clean machine: tear the whole dev stack down, drop the Postgres
-# data volume so it re-inits from sql/, clean-rebuild the dist on JDK 17, then
-# bring infra+app back up. Use to verify a fresh install works end to end.
-# WARNING: this WIPES the dev database (workflows, users, projects, dataset
-# metadata all live in texera_db). Use 'refresh' for everyday code changes.
+# Simulates a clean machine: tear down the dev stack, drop the Postgres volume so
+# it re-inits from sql/, clean-rebuild the dist, then bring infra+app up.
+# WARNING: WIPES the dev database. Use 'refresh' for everyday code changes.
 #
-# DB-BEFORE-BUILD: the sbt build runs JOOQ code generation against a LIVE
-# Postgres on :5432 (it introspects the schema to emit the generated table
-# classes, e.g. WORKFLOW_COVER_IMAGE). So the freshly-wiped DB must be up and
-# re-initialized from sql/ BEFORE 'rebuild clean'. If we build with the DB down,
-# codegen fails ("Connection to localhost:5432 refused"), the build silently
-# falls back to stale generated classes, any new table is missing, and the clean
-# compile dies with "not found: value <TABLE>". That is why we up_db first and
-# only start infra+app after the build.
+# DB-before-build: JOOQ codegen introspects the live :5432 schema during the sbt
+# build, so the wiped DB must be re-initialized from sql/ BEFORE 'rebuild clean'
+# (else codegen falls back to stale classes and the clean compile dies).
 run_fresh() {
   need_ce
   say "fresh: tearing down the dev stack"
   down_app; down_obs
-  # WIPE INFRA VOLUMES TOO, not just the DB. 'down_infra' (plain 'compose down')
-  # keeps lakeFS + MinIO's named volumes (texera-lakefs_minio_data /
-  # _postgres_data), so the object store SURVIVES a fresh DB wipe. That drift is
-  # fatal: the re-initialized Texera DB restarts dataset IDs at 1, but lakeFS
-  # still holds the old per-dataset repos (dataset-1, dataset-2, ...). Creating
-  # or uploading a dataset then fails with lakeFS 409 "error creating
-  # repository: not unique" and the upload is rejected. 'down -v' drops the
-  # project's volumes so the DB and the object store reset together.
+  # Wipe infra volumes too: keeping lakeFS/MinIO data while the DB resets dataset
+  # IDs to 1 makes new datasets collide (lakeFS 409 "not unique"). 'down -v'
+  # resets the DB and object store together.
   say "fresh: tearing down infra + wiping lakeFS/MinIO volumes"
   dc "$INFRA_COMPOSE" down -v >/dev/null 2>&1 && ok "minio/lakefs down (volumes wiped)" || ok "infra already down"
-  # remove the container + its data volume so the next up_db re-inits from sql/
+  # Remove the container + volume so the next up_db re-inits from sql/.
   have_container "$PG_CONTAINER" && { "$CE" rm -f "$PG_CONTAINER" >/dev/null 2>&1 && ok "removed $PG_CONTAINER"; }
-  # Wipe the volume, but DISTINGUISH the failure cases instead of swallowing them.
-  # 'volume rm' returns non-zero if another container still references the
-  # volume; if we ignore that, the OLD schema survives, up_db mounts it (a
-  # non-empty volume does NOT re-run sql/ init), and the build introspects a
-  # stale schema -> clean compile fails on whatever tables this branch changed.
+  # Fail loudly if the volume can't be removed (another container references it):
+  # a surviving stale schema would poison JOOQ codegen and break the clean build.
   if "$CE" volume inspect texera-dev-pgdata >/dev/null 2>&1; then
     "$CE" volume rm texera-dev-pgdata >/dev/null 2>&1 \
       && ok "wiped DB volume texera-dev-pgdata (will re-init from sql/)" \
@@ -323,31 +284,19 @@ run_fresh() {
   else
     ok "DB volume already absent (will re-init from sql/)"
   fi
-  # GUARD: fresh must build against ITS OWN freshly-initialized DB. up_db reuses
-  # whatever already listens on :5432 ("postgres already on :5432, using it").
-  # Having just removed our own $PG_CONTAINER, anything STILL on :5432 is foreign:
-  # a texera_postgres checkout, a leftover '--offset' instance, or another
-  # texera* checkout's dev DB. JOOQ would then generate classes from THAT
-  # database's schema (a different branch) and the clean compile would fail
-  # non-deterministically. Refuse rather than silently poison the build.
+  # Guard: up_db reuses whatever is on :5432. Having removed our own container,
+  # anything still on :5432 is a foreign DB whose schema would poison codegen.
   if port_open 5432; then
     die "fresh: something other than $PG_CONTAINER is already serving :5432 (we just removed ours). The build would generate JOOQ classes from that DB's schema, not this branch's sql/. Stop it first ($CE ps --filter publish=5432), then re-run 'texera_start fresh'."
   fi
-  # bring the wiped DB up first so JOOQ codegen sees the fresh schema (see above).
-  # the postgres image only opens :5432 after its sql/ init scripts finish, so
-  # up_db's port wait guarantees the schema is loaded before we build.
+  # Bring the wiped DB up first so codegen sees the fresh schema (postgres opens
+  # :5432 only after sql/ init finishes, so up_db's wait guarantees it's loaded).
   say "fresh: starting db (re-inits from sql/), needed for JOOQ codegen before the build"
   up_db
   port_open 5432 || die "fresh: postgres never opened :5432, so JOOQ codegen cannot run. Check: $CE logs $PG_CONTAINER"
-  # Wipe the gitignored jOOQ-generated sources so the clean rebuild regenerates
-  # them from THIS DB's exact schema. They are NOT cleaned by 'sbt clean' (they
-  # live under src/, not target/), so a table file left over from a different
-  # schema (e.g. a stale Feedback.java when the fresh DB has no feedback table,
-  # or vice-versa) survives the build: jOOQ rewrites Keys.java for the current
-  # schema while the stale table file still references keys that no longer exist,
-  # and javac dies with "cannot find symbol FEEDBACK_PKEY ... class Keys". Safe
-  # here because up_db just confirmed :5432 is serving, so codegen regenerates
-  # the full package rather than falling back to the (now-deleted) stale files.
+  # Wipe the gitignored jOOQ-generated sources so the rebuild regenerates them for
+  # this schema. 'sbt clean' doesn't touch them (under src/), and a stale table
+  # file would reference keys jOOQ no longer emits, breaking javac.
   local jooq_gen="$ROOT/common/dao/src/main/scala/org/apache/texera/dao/jooq/generated"
   [[ -d "$jooq_gen" ]] && { rm -rf "$jooq_gen" && ok "cleared stale jOOQ generated sources (regenerate from fresh schema)"; }
   rebuild clean
@@ -357,10 +306,8 @@ run_fresh() {
 }
 
 # ---- dev DB schema sync (non-destructive) ----------------------------------
-# Run psql against the dev DB, engine-agnostic: exec inside our own postgres
-# container if it's the one serving :5432, else fall back to a host psql client.
-# Returns 127 if neither is available so callers can warn instead of hanging.
-# stdin is forwarded, so callers can pipe a .sql file in.
+# Run psql against the dev DB: exec inside our postgres container if it serves
+# :5432, else a host psql client. Returns 127 if neither exists. Forwards stdin.
 _psql() {
   if running_container "$PG_CONTAINER"; then
     "$CE" exec -i "$PG_CONTAINER" psql "$@"
@@ -374,20 +321,11 @@ _psql() {
 _db_tables() { _psql -U postgres -d texera_db -tAqc \
   "SELECT tablename FROM pg_tables WHERE schemaname='texera_db' ORDER BY 1;" 2>/dev/null; }
 
-# JOOQ codegen during the sbt build introspects the LIVE :5432 schema to emit the
-# generated table classes (WORKFLOW_COVER_IMAGE, FEEDBACK, ...). 'refresh' keeps
-# the existing DB volume, and a non-empty Postgres volume does NOT re-run sql/ on
-# start, so any table ADDED to sql/texera_ddl.sql since this DB was first
-# initialized is missing from the live schema. Codegen then can't emit its class
-# and the build dies "not found: value <TABLE>" (and silently falls back to stale
-# generated files in the meantime). This brings the live schema up to date with
-# sql/texera_ddl.sql WITHOUT wiping data: we strip every DROP DATABASE/TABLE/TYPE
-# and CREATE DATABASE line, leaving only the idempotent CREATE TABLE IF NOT EXISTS
-# (plus CREATE TYPE/INDEX that error harmlessly when the object already exists).
-# Existing tables are never dropped, so their data is preserved; only the missing
-# tables get created. Column-level changes to existing tables are NOT covered by
-# CREATE TABLE IF NOT EXISTS, so those still need a 'fresh' (the build's readable
-# error in run_refresh tells the user exactly that).
+# Bring the live :5432 schema up to date with sql/texera_ddl.sql WITHOUT wiping
+# data, so JOOQ codegen sees tables added to the DDL since this DB was first
+# initialized (a non-empty volume doesn't re-run sql/ init). Strips DROP and
+# CREATE DATABASE lines, leaving idempotent CREATE TABLE IF NOT EXISTS, so only
+# missing tables are added. Column changes aren't covered; those need 'fresh'.
 sync_dev_schema() {
   port_open 5432 || { warn "postgres not on :5432, cannot sync schema; JOOQ codegen may miss new tables"; return 0; }
   local ddl="$ROOT/sql/texera_ddl.sql"
@@ -400,8 +338,8 @@ sync_dev_schema() {
   say "syncing dev DB schema from sql/texera_ddl.sql (adds missing tables; data preserved)"
   local before after added
   before="$(_db_tables)"
-  # ON_ERROR_STOP=0: pre-existing CREATE TYPE/INDEX/SCHEMA lines error harmlessly.
-  # The file's own \c switches into texera_db, so connect to the postgres maint DB.
+  # ON_ERROR_STOP=0: pre-existing CREATE TYPE/INDEX lines error harmlessly. The
+  # file's own \c switches into texera_db, so connect to the postgres maint DB.
   grep -viE '^[[:space:]]*(DROP[[:space:]]+(DATABASE|TABLE|TYPE)|CREATE[[:space:]]+DATABASE)' "$ddl" \
     | _psql -v ON_ERROR_STOP=0 -U postgres -d postgres -q >/dev/null 2>&1
   after="$(_db_tables)"
@@ -410,27 +348,18 @@ sync_dev_schema() {
 }
 
 # ---- refresh (non-destructive rebuild + restart) ---------------------------
-# Everyday "I changed backend code, show me the change" command. Recompiles and
-# relaunches the app on the new build WITHOUT touching any data: no DB wipe, no
-# volume removal. The frontend's ng serve already hot-reloads, so this is mainly
-# for backend Scala/Java edits, which 'dev'/'app' do NOT pick up on their own
-# (they only build when launchers are missing). Incremental build by default;
-# pass 'clean' for a full rebuild. Brings db+infra up if down (both idempotent,
-# never destructive).
+# Everyday "I changed backend code" command: recompile and relaunch the app on
+# the new build without touching data. Mainly for backend edits (ng serve already
+# hot-reloads). Incremental by default; pass 'clean' for a full rebuild. Brings
+# db+infra up if down (idempotent).
 run_refresh() {
   local mode="${1:-}"
   say "refresh: rebuild + restart (data preserved, no wipe)"
   down_app                 # stop services so they relaunch on the new build
-  # DB must be up BEFORE the build: JOOQ codegen introspects the live :5432 schema
-  # to emit the generated table classes. (Previously up_db ran AFTER rebuild, so a
-  # boot with the DB down made codegen silently fall back to stale classes.)
-  up_db
-  # bring the live schema up to date with sql/ so codegen sees newly added tables
-  # (e.g. workflow_cover_image, feedback). Non-destructive, see sync_dev_schema.
-  sync_dev_schema
-  # Build with a readable failure: if codegen still can't find a table, the dev DB
-  # is behind sql/ in a way the additive sync cannot fix (a column change/rename),
-  # so point the user at 'fresh' instead of dumping a raw Scala compile error.
+  up_db                    # DB up before build: codegen introspects the live :5432 schema
+  sync_dev_schema          # add tables new in sql/ so codegen sees them (non-destructive)
+  # Translate a codegen "table not found" failure into a 'fresh' hint rather than
+  # a raw Scala compile error (the additive sync can't fix column changes).
   local log="${TMPDIR:-/tmp}/texera-refresh-build.log"
   if ! ( rebuild "$mode" ) 2>&1 | tee "$log"; then
     echo
@@ -456,8 +385,7 @@ up_db() {
   if have_container "$PG_CONTAINER"; then "$CE" start "$PG_CONTAINER" >/dev/null
   else
     say "starting dev postgres ($PG_IMAGE) on :5432 via $CE, init from sql/"
-    # ':ro,z' relabels the bind-mounted sql/ for SELinux (Enforcing on Fedora) so
-    # rootless podman can read the init scripts; docker accepts the flag too.
+    # ':ro,z' relabels the bind-mounted sql/ for SELinux so podman can read it.
     "$CE" run -d --name "$PG_CONTAINER" \
       -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
       -p 5432:5432 -v "$ROOT/sql:/docker-entrypoint-initdb.d:ro,z" \
@@ -491,10 +419,9 @@ down_obs() {
 ensure_session() { tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n _ "while :; do sleep 3600; done"; }
 win() { echo "${1//[^A-Za-z0-9_-]/_}"; }
 win_exists() { tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$(win "$1")"; }
-# A window counts as "alive" only if it exists AND its health port is listening.
-# The dist launchers are bash wrappers (java runs as a child), so the pane's
-# foreground command is always `bash` — pane_current_command can't tell live
-# from crashed. The bound port can: a crashed/exited service releases it.
+# A window is "alive" only if it exists AND its health port is listening. The dist
+# launchers are bash wrappers, so the pane command is always `bash`; the bound
+# port is the only reliable liveness signal (a crashed service releases it).
 win_alive() {  # name  [healthport]
   local name="$1" port="${2:-}"
   win_exists "$name" || return 1
@@ -518,21 +445,14 @@ up_app() {
   ensure_built
   local java_env=""; [[ -n "$JDK17" ]] && java_env="JAVA_HOME='$JDK17'"
   local pyenv=""; [[ -x "$ROOT/../venv312/bin/python" ]] && pyenv="UDF_PYTHON_PATH='$ROOT/../venv312/bin/python'"
-  # config-service/file-service/etc. resolve their dropwizard yaml as
-  # $TEXERA_HOME/<service>/src/main/resources/... (default "."). Launched from
-  # the service dir, an unset TEXERA_HOME doubles the path (.../config-service/./config-service/...)
-  # and the service dies "config not found". Pin it to the repo root.
+  # Services resolve their yaml under $TEXERA_HOME; pin it to the repo root or an
+  # unset value doubles the path and they die "config not found".
   local home_env="TEXERA_HOME='$ROOT'"
-  # Backend log level. Defaults to TRACE so trace/debug logs surface in the
-  # observability logs panel; export TEXERA_SERVICE_LOG_LEVEL to override
-  # (e.g. `TEXERA_SERVICE_LOG_LEVEL=INFO texera_start app` to quiet the
-  # framework firehose). Forwarded via env because tmux windows don't inherit
-  # the caller's shell env reliably.
+  # Backend log level (default TRACE); export TEXERA_SERVICE_LOG_LEVEL to override.
+  # Forwarded via env since tmux windows don't inherit the caller's shell env.
   local log_env="TEXERA_SERVICE_LOG_LEVEL='${TEXERA_SERVICE_LOG_LEVEL:-TRACE}'"
-  # If infra (lakeFS) is up, wait for it to actually serve before launching
-  # backends: file-service health-checks lakeFS at boot and crashes if it loses
-  # the race (see wait_for_lakefs). No-op when lakeFS isn't running (e.g. app-be
-  # without infra), so this never blocks a backend-only start.
+  # Wait for lakeFS if it's up so file-service doesn't crash racing it; no-op
+  # otherwise (e.g. app-be without infra).
   running_container texera-lakefs-lakefs && wait_for_lakefs || true
   local n path
   for n in "${DEV_BACKENDS[@]}"; do
@@ -543,8 +463,8 @@ up_app() {
   done
   if [[ "$with_frontend" == yes && -f "$ROOT/frontend/package.json" ]]; then
     need yarn; require_node24 || true
-    # prepend the Node 24 bin to PATH for the frontend window so yarn/ng/npx
-    # resolve the right node. $PATH stays literal so it expands in that shell.
+    # Prepend Node 24 to the frontend window's PATH; $PATH stays literal so it
+    # expands in that shell.
     local node_env=""; [[ -n "$NODE24_BIN" ]] && node_env="PATH=$NODE24_BIN:\$PATH "
     launch frontend "$ROOT/frontend" "${node_env}yarn start" ${SVC_PORTS[frontend]}
     echo; ok "app launched — frontend http://localhost:4200  web API http://localhost:8080"
@@ -557,9 +477,8 @@ down_app() { tmux kill-session -t "$SESSION" 2>/dev/null && ok "app services sto
 attach()   { tmux has-session -t "$SESSION" 2>/dev/null || die "no app session running"; tmux attach -t "$SESSION"; }
 
 # ---- docker single-node ----------------------------------------------------
-# bin/single-node/up.sh execs `docker compose` directly. Under podman we just need
-# the API socket up + DOCKER_HOST exported (ensure_podman_socket), so the v2 binary
-# drives podman instead of a dead docker daemon. No-op under docker.
+# bin/single-node/up.sh execs `docker compose` directly; under podman it needs the
+# API socket up + DOCKER_HOST exported. No-op under docker.
 ensure_compose_engine() { need_ce; ensure_podman_socket; }
 run_docker() {
   ensure_compose_engine; say "single-node (all containers) via $CE"
@@ -597,8 +516,8 @@ status() {
 }
 
 # ---- debug pipeline --------------------------------------------------------
-# `texera_start debug`: db + infra + backends, then relaunch the Amber engine under a
-# JDWP debugger on :5005 so you can attach (:TexeraDebug in nvim, or IntelliJ remote).
+# db + infra + backends, then relaunch the Amber engine under JDWP on :5005 to
+# attach (:TexeraDebug in nvim, or IntelliJ remote).
 run_debug() {
   local port="${TEXERA_DEBUG_PORT:-5005}"
   if [[ "${1:-}" == stop ]]; then

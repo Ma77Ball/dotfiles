@@ -1,8 +1,9 @@
+-- render-markdown.nvim: in-buffer rendering of markdown (headings, lists, code).
 return {
   'MeanderingProgrammer/render-markdown.nvim',
   dependencies = {
     'nvim-treesitter/nvim-treesitter',
-    'nvim-tree/nvim-web-devicons', -- optional icons; remove if you don't use devicons
+    'nvim-tree/nvim-web-devicons', -- icons
   },
   ft = { 'markdown' },
   opts = {},

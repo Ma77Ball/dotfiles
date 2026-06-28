@@ -1,7 +1,5 @@
-// Package tui implements the todome dashboard: a tabbed list of tasks with a
-// side notes pane and quick actions, built on Bubbletea + Lipgloss. The look is
-// shared with msgme/gh-dash. The data layer is local: every mutation goes
-// through store.Store and is persisted to disk immediately.
+// Package tui implements the todome dashboard: a tabbed task list with a notes
+// pane, built on Bubbletea + Lipgloss. Mutations persist immediately.
 package tui
 
 import (
@@ -12,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// mode is the current input/overlay state.
 type mode int
 
 const (
@@ -82,6 +81,7 @@ func (m Model) Init() tea.Cmd { return nil }
 
 // --- update ---
 
+// Update routes messages to the handler for the current mode.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -200,6 +200,7 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateInput handles the add/edit title prompt.
 func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyMatches(msg, keys.Cancel):
@@ -224,7 +225,7 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if was == modeAdd {
 			t := m.st.Add(text)
 			m.save()
-			m.activeView = 0 // jump to Active so the new task is visible
+			m.activeView = 0 // jump to Active to show the new task
 			m.refreshRows()
 			m.selectID(t.ID)
 			m.setStatus("added", false)
@@ -244,6 +245,7 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// updateNotes handles the notes editor (ctrl+s save, ctrl+g cancel).
 func (m Model) updateNotes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+g", "esc":
@@ -290,6 +292,7 @@ func (m Model) updateConfirmDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // --- helpers ---
 
+// refreshRows reloads the current view's rows and clamps the cursor.
 func (m *Model) refreshRows() {
 	v := views[m.activeView]
 	m.rows = m.st.Filtered(v.done, v.all)
@@ -334,6 +337,7 @@ func (m *Model) selectID(id int) {
 	}
 }
 
+// changePriority bumps the selected task's priority within bounds.
 func (m *Model) changePriority(delta int) {
 	t, ok := m.current()
 	if !ok {
@@ -368,6 +372,7 @@ func (m *Model) setStatus(s string, isErr bool) {
 	m.statusErr = isErr
 }
 
+// syncPreview loads the selected task's notes into the preview pane.
 func (m *Model) syncPreview() {
 	if !m.ready {
 		return
@@ -416,6 +421,7 @@ func (m *Model) layout() {
 	m.syncPreview()
 }
 
+// keyMatches reports whether the message matches one of the binding's keys.
 func keyMatches(msg tea.KeyMsg, b interface{ Keys() []string }) bool {
 	s := msg.String()
 	for _, k := range b.Keys() {

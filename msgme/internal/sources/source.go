@@ -1,9 +1,5 @@
-// Package sources defines the unified model and the Source interface that every
-// backend (Slack, Outlook, Google Calendar, Microsoft Teams, ...) implements.
-//
-// The TUI knows nothing about any individual provider: it renders []Item and
-// calls the quick-action methods. Adding a provider means adding a sibling
-// package under sources/ that satisfies Source; nothing in the TUI changes.
+// Package sources defines the Item model and Source interface implemented by
+// each backend.
 package sources
 
 import (
@@ -12,39 +8,32 @@ import (
 	"time"
 )
 
-// ErrUnsupported is returned by an action a source does not implement (e.g.
-// replying to a calendar event). The TUI treats it as "action unavailable here"
-// rather than a hard failure.
+// ErrUnsupported is returned by an action a source does not implement.
 var ErrUnsupported = errors.New("action not supported by this source")
 
-// Item is one row in the dashboard: a Slack message, an email, a calendar
-// event, etc. Sources translate their native payloads into this shape.
+// Item is one row in the dashboard.
 type Item struct {
-	ID      string    // stable, source-scoped id (used for dedupe/actions)
+	ID      string    // stable, source-scoped id
 	Source  string    // source name, e.g. "slack"
-	Section string    // logical section/tab title, e.g. "DMs", "Mentions"
+	Section string    // section/tab title, e.g. "DMs", "Mentions"
 	Title   string    // primary line: sender, channel, or subject
 	Snippet string    // one-line preview shown in the list
 	Body    string    // full content for the preview pane (markdown ok)
-	Time    time.Time // when it happened; used for sorting (newest first)
+	Time    time.Time // event time; sorted newest first
 	Unread  bool      // drives the unread indicator and counts
-	URL     string    // deep link to open in browser/native app ("o" key)
+	URL     string    // deep link opened with the "o" key
 
-	// Handle carries source-specific data the source needs to perform actions
-	// on this item (channel id, message ts, mail id, ...). Opaque to the TUI.
-	Handle any
+	Handle any // source-specific data for actions; opaque to the TUI
 }
 
-// Section is a logical tab the dashboard shows. Each maps to one fetch query
-// against one source.
+// Section is a tab the dashboard shows, mapping to one fetch query on one source.
 type Section struct {
 	Source string // owning source name
 	Title  string // tab label, e.g. "DMs"
-	Key    string // stable key the source switches on inside Fetch
+	Key    string // key the source switches on inside Fetch
 
-	// Setup, when non-empty, marks this as a placeholder tab for a provider that
-	// is not connected yet. The TUI shows this text (connection instructions) in
-	// place of a list/preview and never calls Fetch for it.
+	// Setup, when non-empty, marks a placeholder tab for an unconnected provider:
+	// the TUI shows this text instead of a list and never calls Fetch.
 	Setup string
 }
 

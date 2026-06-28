@@ -1,7 +1,5 @@
-// Command todome is a terminal todo tracker: a tabbed list of tasks you can add,
-// edit, prioritize, and complete, modeled on the structure of ghme/msgme. Tasks
-// persist to ~/.local/share/todome/tasks.json. It doubles as a tiny CLI so you
-// can capture a task without leaving the shell ("todome add ...").
+// Command todome is a terminal todo tracker with a tabbed TUI and a small CLI.
+// Tasks persist to ~/.local/share/todome/tasks.json.
 package main
 
 import (

@@ -1,3 +1,4 @@
+// Rendering for the todome dashboard: tabs, table, sidebar, footer, overlays.
 package tui
 
 import (
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// View renders the full dashboard.
 func (m Model) View() string {
 	if !m.ready {
 		return "starting todome..."
@@ -20,8 +22,9 @@ func (m Model) View() string {
 	)
 }
 
-// --- header / view tab row (gh-dash Tabs) ---
+// --- header / view tab row ---
 
+// renderTabs draws the view tabs with counts and the logo.
 func (m Model) renderTabs() string {
 	active, done := m.st.Counts()
 	cells := make([]string, 0, len(views))
@@ -71,6 +74,7 @@ func (m Model) renderLogo() string {
 
 // --- body ---
 
+// renderBody draws the main area: help/notes overlay, or table plus sidebar.
 func (m Model) renderBody() string {
 	bodyH := m.height - 4 // 3-line header + footer
 	if bodyH < 3 {
@@ -97,7 +101,7 @@ func (m Model) renderBody() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, list, m.renderSidebar(previewW, bodyH))
 }
 
-// renderHelp draws a centered card listing every keybinding (the ? screen).
+// renderHelp draws the centered keybinding card.
 func (m Model) renderHelp(w, h int) string {
 	type binding struct{ key, desc string }
 	rows := []binding{
@@ -136,7 +140,7 @@ func (m Model) renderNotesEditor(w, h int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, head, "", m.notes.View())
 }
 
-// --- table (gh-dash Table) ---
+// --- table ---
 
 const (
 	markW = 3 // priority/done marker column
@@ -163,6 +167,7 @@ func (m Model) renderTable(w, h int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body)
 }
 
+// renderRows draws the visible task rows with scrolling, or a placeholder.
 func (m Model) renderRows(w, h, taskW int) string {
 	rows := m.rows
 	if len(rows) == 0 {
@@ -246,8 +251,7 @@ func cell(text string, w int, right bool) string {
 	return st.Render(truncate(text, w))
 }
 
-// markCell renders the colored leading marker, keeping its glyph color even when
-// the row is selected.
+// markCell renders the colored leading marker, preserving its glyph color when selected.
 func markCell(glyph string, w int, sty lipgloss.Style, selected bool) string {
 	st := lipgloss.NewStyle().Width(w).MaxWidth(w).Padding(0, 1).Inline(true)
 	if selected {
@@ -256,8 +260,7 @@ func markCell(glyph string, w int, sty lipgloss.Style, selected bool) string {
 	return st.Render(sty.Render(glyph))
 }
 
-// styledCell renders one table cell with a foreground color and 1-col padding,
-// extending the selection background across the whole cell when selected.
+// styledCell renders one table cell, extending the selection background when selected.
 func styledCell(text string, w int, fg lipgloss.TerminalColor, right, selected, bold, strike bool) string {
 	inner := w - 2
 	if inner < 1 {
@@ -279,8 +282,9 @@ func styledCell(text string, w int, fg lipgloss.TerminalColor, right, selected, 
 	return st.Render(truncate(text, inner))
 }
 
-// --- sidebar / notes preview (gh-dash Sidebar) ---
+// --- sidebar / notes preview ---
 
+// renderSidebar draws the selected task's title, meta, and notes preview.
 func (m Model) renderSidebar(w, h int) string {
 	t, ok := m.current()
 	contentW := w - 5
@@ -324,6 +328,7 @@ func (m Model) previewMeta(t store.Task) string {
 
 // --- footer ---
 
+// renderFooter draws the status/help bar, or the add/edit prompt.
 func (m Model) renderFooter() string {
 	switch m.mode {
 	case modeAdd:
@@ -361,6 +366,7 @@ func (m Model) renderFooter() string {
 
 // --- small utilities ---
 
+// humanTime formats elapsed time since t as a short relative string.
 func humanTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -378,6 +384,7 @@ func humanTime(t time.Time) string {
 	}
 }
 
+// truncate shortens s to max display columns, adding an ellipsis.
 func truncate(s string, max int) string {
 	if max <= 0 {
 		return ""
@@ -398,6 +405,7 @@ func truncate(s string, max int) string {
 	return string(r) + "…"
 }
 
+// wrap hard-wraps s to width w.
 func wrap(s string, w int) string {
 	if w < 10 {
 		w = 10
@@ -415,6 +423,7 @@ func wrap(s string, w int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// firstLine returns s up to the first newline.
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]

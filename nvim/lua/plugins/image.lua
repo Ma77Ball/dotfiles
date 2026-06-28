@@ -1,16 +1,10 @@
--- Inline image rendering in the terminal (ghostty supports the kitty graphics
--- protocol). Opening a viewable file just shows it — no keymap needed:
---   * images (png/jpg/jpeg/gif/webp/avif/svg/bmp) -> image.nvim "hijacks" the
---     buffer and renders them directly.
---   * .drawio -> converted to SVG (scripts/drawio_to_svg.py) and the rendered
---     page(s) are opened in tabs.
---   * video (mp4/mov/webm/mkv/avi) -> a still preview frame (via ffmpeg); the
---     terminal can't play video inline, so playback is left to an external app.
---   * .pdf -> each page rendered to PNG (pdftoppm) and opened in tabs. Or press
---     <leader>ob in the .pdf buffer to open it in the system browser/viewer.
--- Loaded eagerly (lazy=false) so the autocmds are registered before the file
--- given on the command line is opened. Uses the `magick` CLI (already
--- installed) so no luarock dependency is needed.
+-- image.nvim: inline image rendering via the kitty graphics protocol.
+-- Opening a viewable file just shows it:
+--   * images -> buffer hijacked and rendered directly
+--   * .drawio -> converted to SVG (scripts/drawio_to_svg.py), opened in tabs
+--   * video -> a still preview frame (ffmpeg); no inline playback
+--   * .pdf -> each page to PNG (pdftoppm) in tabs, or <leader>ob to open externally
+-- lazy=false so autocmds register before a command-line file opens.
 return {
   {
     "3rd/image.nvim",
@@ -19,8 +13,7 @@ return {
     opts = {
       backend = "kitty",
       processor = "magick_cli",
-      -- Auto-render these the moment the file is opened (image.nvim's built-in
-      -- buffer hijack). SVG/BMP added on top of the defaults.
+      -- file patterns auto-rendered via buffer hijack (SVG/BMP added to defaults)
       hijack_file_patterns = {
         "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.svg", "*.bmp",
       },
@@ -31,7 +24,7 @@ return {
           filetypes = { "markdown", "vimwiki" },
         },
       },
-      -- Cap rendered size so large diagrams fit the window.
+      -- cap rendered size to the window
       max_width_window_percentage = 100,
       max_height_window_percentage = 100,
       window_overlap_clear_enabled = true, -- hide images behind popups/splits
@@ -45,8 +38,7 @@ return {
       if py == "" then py = vim.fn.exepath("python") end
       local converter = vim.fn.stdpath("config") .. "/scripts/drawio_to_svg.py"
 
-      -- .drawio -> render each page to SVG, open them in tabs (image.nvim then
-      -- hijacks the .svg buffers). The original XML stays in its own tab.
+      -- .drawio -> render each page to SVG, open in tabs (hijacked as images)
       local function handle_drawio(file, buf)
         if vim.b[buf].autoview_done then return end
         vim.b[buf].autoview_done = true
@@ -72,11 +64,9 @@ return {
         end)
       end
 
-      -- pdf -> render each page to PNG (pdftoppm), open them in tabs (image.nvim
-      -- then hijacks the .png buffers). <leader>ob opens it in the system
-      -- browser/viewer instead.
+      -- pdf -> render each page to PNG (pdftoppm) in tabs; <leader>ob opens externally
       local function handle_pdf(file, buf)
-        -- Always (re)bind the browser-open shortcut on the original pdf buffer.
+        -- bind the browser-open shortcut on the pdf buffer
         vim.keymap.set("n", "<leader>ob", function()
           vim.fn.jobstart({ "xdg-open", file }, { detach = true })
           vim.notify("pdf: opened in browser/viewer (" .. vim.fn.fnamemodify(file, ":t") .. ")")
@@ -108,7 +98,7 @@ return {
         end)
       end
 
-      -- video -> extract one preview frame; show it in place of the binary buffer.
+      -- video -> extract one preview frame and show it instead of the binary buffer
       local function handle_video(file, buf)
         if vim.b[buf].autoview_done then return end
         vim.b[buf].autoview_done = true
@@ -144,8 +134,7 @@ return {
         callback = function(ev) handle_pdf(ev.file, ev.buf) end,
       })
 
-      -- Sweep buffers already open when this loaded (e.g. the file passed on the
-      -- command line, opened before the plugin finished loading).
+      -- sweep buffers already open when this loaded (e.g. command-line file)
       for _, buf in ipairs(vim.api.nvim_list_bufs()) do
         local name = vim.api.nvim_buf_get_name(buf)
         if name:match("%.drawio$") then

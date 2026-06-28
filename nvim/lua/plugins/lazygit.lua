@@ -1,26 +1,29 @@
--- Lazygit in a floating terminal, opened with <leader>gg.
--- Reuses the toggleterm.nvim that toggleterm.lua already configures, so there's
--- no extra plugin to manage; this spec only adds the keymap and a cached
--- terminal. Complements the diffview viewers (<leader>gd/<leader>gu) with an
--- actual stage/commit/push UI.
+-- Lazygit in a floating terminal (<leader>gg), reusing toggleterm.nvim.
 local lazygit_term
+local lazygit_dir
 
 local function toggle_lazygit()
-  if not lazygit_term then
+  -- recreate the cached terminal if its buffer was wiped or the cwd changed
+  -- (toggleterm pins a terminal's dir at creation and won't follow :cd)
+  local dir = vim.fn.getcwd()
+  local valid = lazygit_term
+    and lazygit_term.bufnr
+    and vim.api.nvim_buf_is_valid(lazygit_term.bufnr)
+  if not valid or lazygit_dir ~= dir then
+    if lazygit_term then
+      pcall(function() lazygit_term:shutdown() end)
+    end
     local Terminal = require("toggleterm.terminal").Terminal
+    lazygit_dir = dir
     lazygit_term = Terminal:new({
       cmd = "lazygit",
+      dir = dir,     -- pin to the current cwd (use "git_dir" for the repo root)
       hidden = true, -- not part of the numbered toggleterm set; only <leader>gg opens it
       direction = "float",
       float_opts = { border = "curved" },
       on_open = function(term)
         vim.cmd("startinsert!")
-        -- The global TermOpen autocmd in toggleterm.lua maps <Esc> and
-        -- <C-h/j/k/l> to exit terminal mode (for back/cancel and window nav).
-        -- Lazygit relies on Esc for back/cancel and on <C-h/j/k/l> to
-        -- navigate/scroll its panels, so drop those buffer-local maps and let
-        -- the keys reach lazygit. Scheduled so it runs after the autocmd
-        -- installs them.
+        -- drop the toggleterm <Esc>/<C-h/j/k/l> maps so lazygit gets those keys
         vim.schedule(function()
           for _, key in ipairs({ "<Esc>", "<C-h>", "<C-j>", "<C-k>", "<C-l>" }) do
             pcall(vim.keymap.del, "t", key, { buffer = term.bufnr })

@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// View renders the full dashboard.
 func (m Model) View() string {
 	if !m.ready {
 		return m.spinner.View() + " starting msgme..."
@@ -21,8 +22,9 @@ func (m Model) View() string {
 	)
 }
 
-// --- header / app tab row (gh-dash Tabs) ---
+// --- header / app tab row ---
 
+// renderTabs renders the top-level app tab row with the logo.
 func (m Model) renderTabs() string {
 	cells := make([]string, 0, len(m.apps))
 	for i, app := range m.apps {
@@ -52,8 +54,7 @@ func (m Model) renderTabs() string {
 	tabsLine := strings.Join(cells, styTabSep.Render("│"))
 	logo := m.renderLogo() // two lines tall
 
-	// Tabs sit on the bottom line of a two-line header, with the logo to the
-	// right (gh-dash JoinHorizontal at the bottom edge).
+	// tabs on the bottom line of a two-line header, logo to the right
 	left := lipgloss.PlaceVertical(2, lipgloss.Bottom, tabsLine)
 	gap := m.width - lipgloss.Width(tabsLine) - lipgloss.Width(logo)
 	if gap < 0 {
@@ -64,6 +65,7 @@ func (m Model) renderTabs() string {
 	return styTabsRow.Width(m.width).Render(row)
 }
 
+// renderLogo renders the two-line logo with an unread summary.
 func (m Model) renderLogo() string {
 	sub := "your messages"
 	if n := m.totalUnread(); n > 0 {
@@ -76,8 +78,7 @@ func (m Model) renderLogo() string {
 	return lipgloss.NewStyle().Padding(0, 2, 0, 1).Render(logo)
 }
 
-// renderSubTabs is the secondary bar showing the active app's sub-tabs (e.g.
-// Slack's DMs / Mentions), cycled with l/h. Blank for an unconnected app.
+// renderSubTabs renders the active app's sub-tab bar; blank for unconnected apps.
 func (m Model) renderSubTabs() string {
 	if len(m.apps) == 0 {
 		return ""
@@ -106,8 +107,9 @@ func (m Model) renderSubTabs() string {
 
 // --- body ---
 
+// renderBody renders the list (and preview) or a setup card.
 func (m Model) renderBody() string {
-	bodyH := m.height - 5 // 3-line header + sub-tab bar + footer
+	bodyH := m.height - 5 // header + sub-tab bar + footer
 	if bodyH < 3 {
 		bodyH = 3
 	}
@@ -129,7 +131,7 @@ func (m Model) renderBody() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, list, m.renderSidebar(previewW, bodyH))
 }
 
-// renderSetup shows connection instructions for an unconnected provider.
+// renderSetup renders the centered connection-instructions card.
 func (m Model) renderSetup(w, h int) string {
 	sec := m.sections[m.active]
 	card := lipgloss.JoinVertical(lipgloss.Left,
@@ -140,11 +142,10 @@ func (m Model) renderSetup(w, h int) string {
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, stySetupBox.Render(card))
 }
 
-// --- table (gh-dash Table) ---
+// --- table ---
 //
-// Rows are two lines tall like gh-dash's non-compact rows: line 1 is the sender
-// (with a right-aligned relative time), line 2 is the message snippet. The
-// selection background spans both lines.
+// Rows are two lines tall: line 1 is the sender with a right-aligned relative
+// time, line 2 is the snippet. The selection background spans both lines.
 
 const (
 	dotW  = 3 // unread-dot column
@@ -152,6 +153,7 @@ const (
 	rowH  = 2 // lines per row
 )
 
+// renderTable renders the message list header and rows.
 func (m Model) renderTable(w, h int) string {
 	fromW := w - dotW - timeW
 	if fromW < 6 {
@@ -163,7 +165,7 @@ func (m Model) renderTable(w, h int) string {
 		styHeaderCell.Render(cell("TIME", timeW-2, true))
 	header = lipgloss.NewStyle().Width(w).MaxWidth(w).Render(header)
 
-	bodyH := h - 1 // header line
+	bodyH := h - 1 // minus header line
 	if bodyH < rowH {
 		bodyH = rowH
 	}
@@ -171,6 +173,7 @@ func (m Model) renderTable(w, h int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body)
 }
 
+// renderRows renders the visible rows, or a loading/error/empty placeholder.
 func (m Model) renderRows(w, h, fromW int) string {
 	rows := m.items[m.active]
 
@@ -238,8 +241,7 @@ func cell(text string, w int, right bool) string {
 	return st.Render(truncate(text, w))
 }
 
-// colorCell renders one table cell with a foreground color and 1-col padding,
-// extending the 236 selection background across the whole cell when selected.
+// colorCell renders a table cell with color, padding, and selection background.
 func colorCell(text string, w int, fg lipgloss.TerminalColor, right, selected, bold bool) string {
 	inner := w - 2
 	if inner < 1 {
@@ -258,11 +260,12 @@ func colorCell(text string, w int, fg lipgloss.TerminalColor, right, selected, b
 	return st.Render(truncate(text, inner))
 }
 
-// --- sidebar / preview (gh-dash Sidebar) ---
+// --- sidebar / preview ---
 
+// renderSidebar renders the preview pane for the selected item.
 func (m Model) renderSidebar(w, h int) string {
 	it, ok := m.current()
-	contentW := w - 5 // left border (1) + padding (2+2)
+	contentW := w - 5 // border (1) + padding (2+2)
 	if contentW < 8 {
 		contentW = 8
 	}
@@ -280,6 +283,7 @@ func (m Model) renderSidebar(w, h int) string {
 	return stySidebar.Width(w - 1).Height(h).Render(content)
 }
 
+// previewMeta builds the "section · time · unread" meta line.
 func (m Model) previewMeta(it sources.Item) string {
 	parts := make([]string, 0, 3)
 	if it.Section != "" {
@@ -300,12 +304,12 @@ func (m Model) previewMeta(it sources.Item) string {
 
 // --- footer ---
 
+// renderFooter renders the reply input, status line, or key hints.
 func (m Model) renderFooter() string {
 	if m.mode == modeReply {
 		return styFooterBar.Width(m.width).Render(styFooterOk.Render("reply ❯ ") + m.reply.View())
 	}
 
-	// Right-aligned "? help" pill (gh-dash footer indicator).
 	pill := styHelpPill.Render("? help")
 
 	var left string
@@ -333,6 +337,7 @@ func (m Model) renderFooter() string {
 
 // --- small utilities ---
 
+// unreadCount counts unread items in a section.
 func (m Model) unreadCount(section int) int {
 	n := 0
 	for _, it := range m.items[section] {
@@ -343,6 +348,7 @@ func (m Model) unreadCount(section int) int {
 	return n
 }
 
+// totalUnread sums unread across all sections.
 func (m Model) totalUnread() int {
 	n := 0
 	for s := range m.items {
@@ -370,6 +376,7 @@ func (m Model) appLoading(appIdx int) bool {
 	return false
 }
 
+// humanTime formats elapsed time as now/Nm/Nh/Nd.
 func humanTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -387,9 +394,10 @@ func humanTime(t time.Time) string {
 	}
 }
 
-// timeSince is a tiny indirection so tests could stub it later.
+// timeSince is an indirection over time.Since for tests.
 func timeSince(t time.Time) time.Duration { return time.Since(t) }
 
+// truncate shortens s to max display columns with an ellipsis.
 func truncate(s string, max int) string {
 	if max <= 0 {
 		return ""
@@ -410,6 +418,7 @@ func truncate(s string, max int) string {
 	return string(r) + "…"
 }
 
+// wrap hard-wraps s at width w.
 func wrap(s string, w int) string {
 	if w < 10 {
 		w = 10

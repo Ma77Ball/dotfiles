@@ -1,9 +1,5 @@
 // Package tui implements the msgme dashboard: a tabbed list of message sections
 // with a side preview pane and quick actions, built on Bubbletea + Lipgloss.
-//
-// The model is source-agnostic: it holds a flat list of sources.Section tabs and
-// a map of fetched sources.Item rows, and dispatches actions through the owning
-// sources.Source. Slack is the only source today; others slot in unchanged.
 package tui
 
 import (
@@ -27,9 +23,7 @@ const (
 	modeReply
 )
 
-// appTab is one top-level app (a source, connected or not). Its sub-tabs are the
-// app's sections; for an unconnected app secs holds its single setup placeholder.
-// Apps are cycled with tab/shift-tab; sub-tabs within an app with l/h.
+// appTab is one top-level app (a source); its sub-tabs are the app's sections.
 type appTab struct {
 	title string // display title, e.g. "Slack"
 	secs  []int  // indices into Model.sections (the sub-tabs)
@@ -65,9 +59,8 @@ type Model struct {
 	ready   bool
 }
 
-// New builds the model from connected sources, placeholder setup tabs for
-// providers that are not connected, and an auto-refresh interval (0 disables
-// auto-refresh). Connected sections come first, then the setup tabs.
+// New builds the model from connected sources, setup tabs, and a refresh
+// interval (0 disables). Connected sections come first.
 func New(srcs []sources.Source, setupTabs []sources.Section, refresh time.Duration) Model {
 	byName := map[string]sources.Source{}
 	var secs []sources.Section
@@ -111,7 +104,7 @@ func buildApps(secs []sources.Section) []appTab {
 		if !ok {
 			title := appTitle(s.Source)
 			if s.Setup != "" {
-				title = s.Title // setup tabs already carry a display title
+				title = s.Title // setup tabs carry their own title
 			}
 			apps = append(apps, appTab{title: title})
 			ai = len(apps) - 1
@@ -138,14 +131,12 @@ func appTitle(source string) string {
 	}
 }
 
-// isSetup reports whether the section at index i is a placeholder tab for an
-// unconnected provider (no Fetch, no list, just instructions).
+// isSetup reports whether section i is an unconnected-provider placeholder.
 func (m Model) isSetup(i int) bool {
 	return i >= 0 && i < len(m.sections) && m.sections[i].Setup != ""
 }
 
-// syncActive recomputes the current global section index from the active app and
-// its active sub-tab.
+// syncActive recomputes the global section index from the active app/sub-tab.
 func (m *Model) syncActive() {
 	if len(m.apps) == 0 {
 		m.active = 0
@@ -188,19 +179,23 @@ func (m *Model) cycleSub(d int) {
 
 // --- messages ---
 
+// fetchedMsg carries a section's fetch result.
 type fetchedMsg struct {
 	section int
 	items   []sources.Item
 	err     error
 }
 
+// actionMsg carries the result of a mark-read or reply action.
 type actionMsg struct {
 	verb string
 	err  error
 }
 
+// tickMsg drives auto-refresh.
 type tickMsg time.Time
 
+// Init starts initial fetches, the spinner, and the refresh tick.
 func (m Model) Init() tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(m.sections)+2)
 	for i := range m.sections {
@@ -219,6 +214,7 @@ func (m Model) Init() tea.Cmd {
 
 // --- commands ---
 
+// fetchCmd fetches one section's items.
 func (m Model) fetchCmd(section int) tea.Cmd {
 	sec := m.sections[section]
 	src := m.srcs[sec.Source]
@@ -230,6 +226,7 @@ func (m Model) fetchCmd(section int) tea.Cmd {
 	}
 }
 
+// markReadCmd marks an item read on its source.
 func (m Model) markReadCmd(it sources.Item) tea.Cmd {
 	src := m.srcs[it.Source]
 	return func() tea.Msg {
@@ -239,6 +236,7 @@ func (m Model) markReadCmd(it sources.Item) tea.Cmd {
 	}
 }
 
+// replyCmd posts a reply to an item on its source.
 func (m Model) replyCmd(it sources.Item, text string) tea.Cmd {
 	src := m.srcs[it.Source]
 	return func() tea.Msg {
@@ -248,12 +246,14 @@ func (m Model) replyCmd(it sources.Item, text string) tea.Cmd {
 	}
 }
 
+// tickCmd schedules the next refresh tick.
 func tickCmd(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 // --- update ---
 
+// Update handles incoming messages and key events.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -284,7 +284,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus(msg.verb, false)
 		}
-		// Refresh the active section so the change is reflected.
+		// refresh the active section to reflect the change
 		m.loading[m.active] = true
 		return m, m.fetchCmd(m.active)
 
@@ -310,6 +310,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateNormal handles keys in normal mode.
 func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyMatches(msg, keys.Quit):
@@ -383,6 +384,7 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateReply handles keys while composing a reply.
 func (m Model) updateReply(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyMatches(msg, keys.Cancel):
@@ -411,6 +413,7 @@ func (m Model) updateReply(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // --- helpers ---
 
+// moveCursor moves the selected row within the active section.
 func (m *Model) moveCursor(delta int) {
 	n := len(m.items[m.active])
 	if n == 0 {
@@ -427,6 +430,7 @@ func (m *Model) moveCursor(delta int) {
 	m.syncPreview()
 }
 
+// current returns the selected item in the active section.
 func (m Model) current() (sources.Item, bool) {
 	rows := m.items[m.active]
 	c := m.cursor[m.active]
@@ -448,11 +452,13 @@ func (m *Model) maybeFetch(section int) tea.Cmd {
 	return m.fetchCmd(section)
 }
 
+// setStatus sets the footer status message.
 func (m *Model) setStatus(s string, isErr bool) {
 	m.status = s
 	m.statusErr = isErr
 }
 
+// syncPreview loads the selected item into the preview pane.
 func (m *Model) syncPreview() {
 	if !m.ready {
 		return
@@ -470,8 +476,7 @@ func (m *Model) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	// Reserve: 3-line header (2-line logo/tabs + thick underline), 1-line
-	// sub-tab bar, 1-line footer.
+	// reserve 3-line header + sub-tab bar + footer
 	bodyH := m.height - 5
 	if bodyH < 3 {
 		bodyH = 3
@@ -483,12 +488,12 @@ func (m *Model) layout() {
 			pw = 30
 		}
 	}
-	// Sidebar content width = pane - left border (1) - horizontal padding (2+2).
+	// content width = pane - border (1) - padding (2+2)
 	contentW := pw - 5
 	if contentW < 8 {
 		contentW = 8
 	}
-	// Sidebar reserves title, meta, two rules, and a pager line around the body.
+	// reserve title, meta, two rules, and pager around the body
 	vh := bodyH - 5
 	if vh < 1 {
 		vh = 1
@@ -498,6 +503,7 @@ func (m *Model) layout() {
 	m.syncPreview()
 }
 
+// keyMatches reports whether msg matches any of binding b's keys.
 func keyMatches(msg tea.KeyMsg, b interface{ Keys() []string }) bool {
 	s := msg.String()
 	for _, k := range b.Keys() {
@@ -508,8 +514,7 @@ func keyMatches(msg tea.KeyMsg, b interface{ Keys() []string }) bool {
 	return false
 }
 
-// openURL launches the URL via $BROWSER or xdg-open, fully detached so its
-// output never paints over the TUI (same trick ghme uses).
+// openURL opens the URL via $BROWSER or xdg-open, detached from the TUI.
 func openURL(url string) {
 	bin := os.Getenv("BROWSER")
 	if bin == "" {

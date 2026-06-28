@@ -1,5 +1,5 @@
 // Package config loads msgme's YAML config from the XDG config dir
-// (~/.config/msgme/config.yml), mirroring how gh-dash is configured.
+// (~/.config/msgme/config.yml).
 package config
 
 import (
@@ -10,60 +10,39 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the whole on-disk configuration.
+// Config is the on-disk configuration.
 type Config struct {
-	// Slack holds the Slack source settings. Nil/disabled if not configured.
-	Slack SlackConfig `yaml:"slack"`
+	Slack   SlackConfig   `yaml:"slack"`
+	MSGraph MSGraphConfig `yaml:"msgraph"` // Outlook + Teams
+	Google  GoogleConfig  `yaml:"google"`  // Google Calendar
 
-	// MSGraph holds the Microsoft Graph source (Outlook + Teams) settings.
-	MSGraph MSGraphConfig `yaml:"msgraph"`
-
-	// Google holds the Google Calendar source settings.
-	Google GoogleConfig `yaml:"google"`
-
-	// RefreshMinutes auto-refreshes every section on this interval. 0 disables.
-	RefreshMinutes int `yaml:"refreshMinutes"`
+	RefreshMinutes int `yaml:"refreshMinutes"` // auto-refresh interval; 0 disables
 }
 
 // SlackConfig configures the Slack source.
 type SlackConfig struct {
-	Enabled bool `yaml:"enabled"`
-
-	// Token is a Slack user OAuth token (xoxp-...). For security, prefer leaving
-	// this empty and exporting SLACK_TOKEN in the environment instead; the env
-	// var wins when both are set. See README for required scopes.
-	Token string `yaml:"token"`
-
-	// Sections lists which Slack tabs to show. Defaults applied if empty.
-	Sections []string `yaml:"sections"`
+	Enabled  bool     `yaml:"enabled"`
+	Token    string   `yaml:"token"`    // user OAuth token (xoxp-...); SLACK_TOKEN env overrides
+	Sections []string `yaml:"sections"` // tabs to show; defaults if empty
 }
 
 // MSGraphConfig configures the Microsoft Graph source (Outlook mail + Teams).
 type MSGraphConfig struct {
-	Enabled bool `yaml:"enabled"`
-
-	// ClientID is the Azure AD app registration (Application/client) ID.
-	// Can also be supplied via the MSGRAPH_CLIENT_ID env var.
-	ClientID string `yaml:"clientID"`
-
-	// Tenant defaults to "common" (personal + work/school accounts).
-	Tenant string `yaml:"tenant"`
-
-	// Sections lists which tabs to show; defaults to Mail + Teams.
-	Sections []string `yaml:"sections"`
+	Enabled  bool     `yaml:"enabled"`
+	ClientID string   `yaml:"clientID"` // Azure AD app ID; MSGRAPH_CLIENT_ID env overrides
+	Tenant   string   `yaml:"tenant"`   // defaults to "common"
+	Sections []string `yaml:"sections"` // tabs to show; defaults to Mail + Teams
 }
 
 // GoogleConfig configures the Google Calendar source.
 type GoogleConfig struct {
 	Enabled bool `yaml:"enabled"`
 
-	// ClientID/ClientSecret come from a Google "Desktop app" OAuth client.
-	// Can also be supplied via GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env vars.
+	// From a Google "Desktop app" OAuth client; GOOGLE_CLIENT_ID/SECRET env override.
 	ClientID     string `yaml:"clientID"`
 	ClientSecret string `yaml:"clientSecret"`
 
-	// Sections lists which tabs to show; defaults to Calendar.
-	Sections []string `yaml:"sections"`
+	Sections []string `yaml:"sections"` // tabs to show; defaults to Calendar
 }
 
 // Default returns a config with sensible defaults applied.
@@ -96,9 +75,8 @@ func Path() string {
 	return filepath.Join(base, "msgme", "config.yml")
 }
 
-// Load reads the config file, layering it over Default(). A missing file is not
-// an error: defaults are returned so first run works. The SLACK_TOKEN env var
-// always overrides the file token.
+// Load reads the config file over Default(), applying env-var overrides and
+// section defaults. A missing file returns defaults.
 func Load() (Config, error) {
 	cfg := Default()
 	path := Path()
@@ -106,7 +84,7 @@ func Load() (Config, error) {
 	data, err := os.ReadFile(path)
 	switch {
 	case os.IsNotExist(err):
-		// First run: keep defaults.
+		// keep defaults
 	case err != nil:
 		return cfg, fmt.Errorf("reading %s: %w", path, err)
 	default:

@@ -2,11 +2,7 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Palette and styles ported from gh-dash's theme so msgme shares its look:
-// a two-line cyan logo + pill tab row with a thick underline, two-line table
-// rows with a full-width selection bar, a left-bordered markdown sidebar, and a
-// full-width footer bar with a "? help" pill. Colors are adaptive light/dark
-// pairs copied from gh-dash's DefaultTheme (ANSI 256).
+// Palette and lipgloss styles for the dashboard.
 var (
 	colSelectedBg = lipgloss.AdaptiveColor{Light: "7", Dark: "236"}   // selection bar / active tab / footer
 	colPrimaryBd  = lipgloss.AdaptiveColor{Light: "8", Dark: "8"}     // tab underline / sidebar border
@@ -15,13 +11,13 @@ var (
 	colPrimary    = lipgloss.AdaptiveColor{Light: "0", Dark: "15"}    // primary text
 	colSecondary  = lipgloss.AdaptiveColor{Light: "244", Dark: "251"} // secondary text
 	colFaint      = lipgloss.AdaptiveColor{Light: "7", Dark: "245"}   // faint text
-	colLogo       = lipgloss.Color("#00F9FB")                         // gh-dash logo cyan
+	colLogo       = lipgloss.Color("#00F9FB")                         // logo cyan
 	colUnread     = lipgloss.AdaptiveColor{Light: "5", Dark: "213"}   // unread dot
 	colSuccess    = lipgloss.AdaptiveColor{Light: "10", Dark: "10"}
 	colWarning    = lipgloss.AdaptiveColor{Light: "11", Dark: "11"}
 	colError      = lipgloss.AdaptiveColor{Light: "1", Dark: "9"}
 
-	// --- tab row (gh-dash Tabs.*) ---
+	// --- tab row ---
 	styTab = lipgloss.NewStyle().
 		Faint(true).
 		Padding(0, 2)
@@ -51,12 +47,12 @@ var (
 	stySub       = lipgloss.NewStyle().Foreground(colFaint)
 	stySubActive = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Underline(true)
 
-	// --- table (gh-dash Table.*) ---
+	// --- table ---
 	styHeaderCell = lipgloss.NewStyle().Bold(true).Foreground(colPrimary).Padding(0, 1)
 
 	styUnreadDot = lipgloss.NewStyle().Foreground(colUnread)
 
-	// --- sidebar / preview (gh-dash Sidebar.*) ---
+	// --- sidebar / preview ---
 	stySidebar = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderTop(false).
@@ -71,7 +67,7 @@ var (
 	stySidebarRule = lipgloss.NewStyle().Foreground(colFaintBd)
 	styPager       = lipgloss.NewStyle().Foreground(colFaint).Bold(true)
 
-	// --- footer bar (gh-dash Common.FooterStyle + "? help" pill) ---
+	// --- footer bar ---
 	styFooterBar = lipgloss.NewStyle().Background(colSelectedBg).Foreground(colFaint)
 	styHelpPill  = lipgloss.NewStyle().Background(colFaint).Foreground(colSelectedBg).Padding(0, 1)
 	styFooterErr = lipgloss.NewStyle().Background(colSelectedBg).Foreground(colError).Bold(true)

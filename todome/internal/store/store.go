@@ -1,7 +1,5 @@
 // Package store persists todome's tasks as a single JSON file in the XDG data
-// dir (~/.local/share/todome/tasks.json). Unlike ghme/msgme, which read remote
-// services, todome owns its data, so the store is the whole backend: load the
-// file, mutate the in-memory slice, Save() back atomically.
+// dir (~/.local/share/todome/tasks.json).
 package store
 
 import (
@@ -53,9 +51,7 @@ type Store struct {
 	path string // not serialized
 }
 
-// Path returns the resolved tasks.json path, honoring XDG_DATA_HOME. Task data
-// is application *state*, so it lives under ~/.local/share, not ~/.config like
-// msgme/gh-dash, which hold user-edited configuration.
+// Path returns the resolved tasks.json path, honoring XDG_DATA_HOME.
 func Path() string {
 	base := os.Getenv("XDG_DATA_HOME")
 	if base == "" {
@@ -65,8 +61,7 @@ func Path() string {
 	return filepath.Join(base, "todome", "tasks.json")
 }
 
-// Load reads the task file. A missing file is not an error: an empty store is
-// returned so the first run works.
+// Load reads the task file; a missing file yields an empty store.
 func Load() (*Store, error) {
 	path := Path()
 	s := &Store{path: path, NextID: 1}
@@ -88,8 +83,7 @@ func Load() (*Store, error) {
 	return s, nil
 }
 
-// Save writes the store back atomically (temp file + rename) so a crash mid-write
-// never corrupts the task list.
+// Save writes the store back atomically via a temp file and rename.
 func (s *Store) Save() error {
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -165,9 +159,8 @@ func (s *Store) Toggle(id int) *Task {
 	return t
 }
 
-// Filtered returns the tasks matching a view, sorted for display: active tasks
-// by priority (high first) then oldest-first; done tasks most-recently-done
-// first.
+// Filtered returns tasks for a view, sorted: active by priority then oldest
+// first; done by most-recently-done first.
 func (s *Store) Filtered(done bool, all bool) []Task {
 	var out []Task
 	for _, t := range s.Tasks {

@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// keyMap holds todome's keybindings, vim-flavored like gh-dash/msgme.
+// keyMap holds todome's keybindings.
 type keyMap struct {
 	Up       key.Binding
 	Down     key.Binding

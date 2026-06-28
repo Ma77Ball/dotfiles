@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
-# ghme-rebuild - build the patched gh-dash (ghme) from the source vendored in
-# dotfiles and install it as the `gh dash` extension binary.
-#
-# The full, already-patched gh-dash source lives in dotfiles/ghme (vendored just
-# like dotfiles/msgme), so ghme builds on any machine that has Go: no upstream
-# clone, no network, no patch step. To change ghme's behavior, edit the Go source
-# under dotfiles/ghme directly, then run ghme-rebuild (or re-run install.sh).
-#
-# Usage: ghme-rebuild
-#   GHME_SRC=/path/to/ghme ghme-rebuild   # override the source location
+# ghme-rebuild - build the vendored gh-dash source and install it as the `gh dash` binary.
+# Usage: ghme-rebuild   (GHME_SRC=/path overrides the source location)
 set -euo pipefail
 
-# Locate the vendored source. Prefer $GHME_SRC, then $DOTFILES/ghme, then the
-# usual dotfiles clone locations. A valid source dir contains go.mod.
+# Find the vendored source (dir with go.mod): $GHME_SRC, then common clone paths.
 src="${GHME_SRC:-}"
 if [[ -z "$src" ]]; then
   for cand in "${DOTFILES:-}/ghme" "$HOME/dotfiles/ghme" "$HOME/.dotfiles/ghme"; do
@@ -33,16 +24,12 @@ mkdir -p "$extdir"
 
 echo "ghme-rebuild: building gh-dash from $src"
 echo "  compiling (a minute or so)..."
-# Build into a temp file in the SAME dir so the final install is an atomic
-# rename on one filesystem (works even while ghme is running: the live process
-# keeps the old inode, the next launch picks up the new binary).
+# Build to a temp file in the same dir so install is an atomic rename.
 tmp="$extdir/.gh-dash.build.$$"
 trap 'rm -f "$tmp"' EXIT
 ( cd "$src" && GOFLAGS=-mod=mod go build -trimpath -o "$tmp" . )
 
-# Register as a gh extension so `gh dash` dispatches to this binary. A binary
-# extension needs only the dir, the executable, and a manifest.yml; create the
-# manifest if missing so this works with no `gh extension install` / network.
+# Write the gh extension manifest if missing so `gh dash` dispatches to this binary.
 if [[ ! -f "$extdir/manifest.yml" ]]; then
   cat >"$extdir/manifest.yml" <<EOF
 owner: dlvhdr

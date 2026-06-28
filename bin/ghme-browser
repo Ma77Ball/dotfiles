@@ -1,6 +1,4 @@
 #!/bin/sh
-# Quiet browser launcher for ghme/gh-dash.
-# xdg-open (via gio) and the browser print to stdout/stderr, which leaks into
-# the gh-dash TUI and corrupts its drawing. Discard all output and detach so
-# the terminal UI is never touched.
+# Quiet browser launcher for ghme/gh-dash: opens a URL detached, output discarded.
+# Usage: ghme-browser <url...>
 setsid xdg-open "$@" >/dev/null 2>&1 < /dev/null &

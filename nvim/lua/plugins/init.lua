@@ -1,3 +1,4 @@
+-- multicursor.nvim: multiple cursors for simultaneous edits.
 return {
   {
     "jake-stewart/multicursor.nvim",

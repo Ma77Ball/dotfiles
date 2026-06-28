@@ -3,9 +3,7 @@ return {
   {
     "akinsho/toggleterm.nvim",
     version = "*",
-    -- Load at startup so the <C-\> open_mapping (registered inside config below)
-    -- always exists. Without this, lazy.nvim treats the plugin as lazy, never
-    -- loads it, and <C-\> silently does nothing.
+    -- load at startup so the <C-\> open_mapping always exists
     lazy = false,
     config = function()
       require("toggleterm").setup({
@@ -15,7 +13,7 @@ return {
         start_in_insert = true,
       })
 
-      -- Make <C-\> also toggle from inside the terminal, and ease window nav.
+      -- in terminal mode: <C-\> toggles, <Esc> exits, <C-h/j/k/l> moves windows
       vim.api.nvim_create_autocmd("TermOpen", {
         pattern = "term://*toggleterm#*",
         callback = function()

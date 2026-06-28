@@ -1,13 +1,6 @@
-// Package gcal implements sources.Source for Google Calendar (read-only:
-// upcoming events). Calendar events have no "unread" or reply concept, so those
-// actions return sources.ErrUnsupported.
-//
-// Auth is the OAuth2 authorization-code flow with a localhost redirect
-// (run `msgme login google`). Set up a free OAuth client at
-// https://console.cloud.google.com -> APIs & Services -> Credentials:
-//   - Enable the "Google Calendar API".
-//   - Create an OAuth client ID of type "Desktop app" (allows loopback ports).
-//   - Put the client ID and secret in config under google.clientID/clientSecret.
+// Package gcal implements sources.Source for Google Calendar (read-only upcoming
+// events). Events have no unread/reply concept, so those actions return
+// sources.ErrUnsupported. Auth uses the loopback OAuth2 flow (msgme login google).
 package gcal
 
 import (
@@ -49,8 +42,7 @@ type Source struct {
 	sections []string
 }
 
-// New builds the source from a configured client. Returns an error (so the
-// caller can surface "run msgme login google") if no cached token exists.
+// New builds the source from a configured client; errors if no token is cached.
 func New(ctx context.Context, clientID, clientSecret string, sectionTitles []string) (*Source, error) {
 	if strings.TrimSpace(clientID) == "" {
 		return nil, fmt.Errorf("gcal: no clientID (set google.clientID in config)")
@@ -64,8 +56,7 @@ func New(ctx context.Context, clientID, clientSecret string, sectionTitles []str
 
 func (s *Source) Name() string { return "gcal" }
 
-// SetupTab returns the placeholder tab the dashboard shows when Google Calendar
-// is not connected, explaining how to create an OAuth client and log in.
+// SetupTab returns the placeholder tab shown when Google Calendar is not connected.
 func SetupTab() sources.Section {
 	return sources.Section{Source: "gcal", Title: "Calendar", Setup: setupHelp}
 }
@@ -85,6 +76,7 @@ Create a free OAuth client (read-only upcoming events):
 
 Verify any time with:  msgme doctor`
 
+// Sections returns the configured calendar tabs.
 func (s *Source) Sections() []sources.Section {
 	out := make([]sources.Section, 0, len(s.sections))
 	for _, title := range s.sections {
@@ -93,6 +85,7 @@ func (s *Source) Sections() []sources.Section {
 	return out
 }
 
+// eventsResp is the Calendar events.list response.
 type eventsResp struct {
 	Items []struct {
 		ID       string `json:"id"`
@@ -111,6 +104,7 @@ type eventsResp struct {
 	} `json:"items"`
 }
 
+// Fetch returns upcoming events as items.
 func (s *Source) Fetch(ctx context.Context, section sources.Section) ([]sources.Item, error) {
 	q := url.Values{}
 	q.Set("timeMin", nowRFC3339(ctx))
@@ -160,7 +154,7 @@ func (s *Source) Fetch(ctx context.Context, section sources.Section) ([]sources.
 			Snippet: formatWhen(when, allDay),
 			Body:    body,
 			Time:    when,
-			Unread:  false, // events are not "unread"; no dot/count
+			Unread:  false, // events are never unread
 			URL:     e.HTMLLink,
 			Handle:  nil,
 		})
@@ -176,6 +170,7 @@ func (s *Source) Reply(_ context.Context, _ sources.Item, _ string) error {
 
 // --- utils ---
 
+// parseTime parses an RFC3339 datetime or a date-only string.
 func parseTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
@@ -189,6 +184,7 @@ func parseTime(s string) time.Time {
 	return time.Time{}
 }
 
+// formatWhen renders an event's start time for display.
 func formatWhen(t time.Time, allDay bool) string {
 	if t.IsZero() {
 		return ""
@@ -199,8 +195,7 @@ func formatWhen(t time.Time, allDay bool) string {
 	return t.Local().Format("Mon Jan 2 15:04")
 }
 
-// nowRFC3339 returns the current time as an RFC3339 string. It accepts a context
-// only to keep a single seam for tests; production uses the wall clock.
+// nowRFC3339 returns the current time as an RFC3339 string.
 func nowRFC3339(_ context.Context) string {
 	return time.Now().Format(time.RFC3339)
 }

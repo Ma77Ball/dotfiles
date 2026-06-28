@@ -4,18 +4,13 @@
 
 set -euo pipefail
 
-# Open links through a quiet wrapper. xdg-open (gio) and the browser print to
-# stdout/stderr, which gh-dash lets inherit the terminal — that text paints over
-# the TUI and leaves off-by-a-few-pixels duplicate rows. The wrapper discards
-# all output and detaches, so pressing `o` never touches the UI.
+# Quiet browser wrapper so `o` doesn't paint over the TUI.
 export BROWSER="$HOME/.local/bin/ghme-browser"
 
-# Remember the directory ghme was launched from so the checkout keybinding can
-# operate on *this* clone instead of a hardcoded repoPaths mapping. gh-dash
-# inherits this env var and exposes it to the shell that runs the keybinding.
+# Launch dir, inherited by gh-dash keybindings (checkout target).
 export GHME_LAUNCH_DIR="$PWD"
 
-# --help / -h: show usage and the in-TUI keybindings, then exit.
+# --help / -h: print usage and exit.
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 ghme — your GitHub dashboard (PRs & issues) in a terminal UI
@@ -87,8 +82,8 @@ if [[ "${1:-}" == "--edit" ]]; then
   exec "${EDITOR:-nano}" "$HOME/.config/gh-dash/config.yml"
 fi
 
-# gh dash has no flag to pick a section or repo, so these launch the TUI with a
-# generated temporary config (cleaned up on exit) passed via --config.
+# Launch the TUI reading a config from stdin into a temp file (gh dash has no
+# flag to pick a section/repo).
 launch_with_config() {
   local cfg
   cfg=$(mktemp --suffix=.gh-dash.yml)
@@ -97,12 +92,8 @@ launch_with_config() {
   exec gh dash --config "$cfg"
 }
 
-# Emit a gh-dash config, optionally scoped to a single repo ($1, "owner/name";
-# empty = no scoping). Rather than hardcode a section list (which drifts from
-# the user's real tabs), take the actual config.yml and append `repo:<repo>` to
-# every section filter — keeping ALL original tabs, layout, keybindings, and
-# defaults intact. Also inject a repoPaths entry so gh-dash's built-in checkout
-# and any {{.RepoPath}} lookup resolve to the folder ghme was launched from.
+# Emit a gh-dash config, optionally scoped to a repo ($1 = "owner/name", empty =
+# none): append `repo:<repo>` to each filter and add a repoPaths entry.
 GHME_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/gh-dash/config.yml"
 emit_repo_scoped_config() {
   local repo="$1"
@@ -117,7 +108,7 @@ emit_repo_scoped_config() {
         cat "$GHME_CONFIG_FILE"
       fi
     else
-      # Fallback if the config file is missing: a minimal dashboard.
+      # Minimal dashboard when config.yml is missing.
       cat <<EOF
 prSections:
   - title: My PRs
@@ -132,19 +123,15 @@ defaults:
   preview: { open: true, width: 60, position: auto }
 EOF
     fi
-    # repoPaths maps repo -> local clone so the built-in checkout / {{.RepoPath}}
-    # resolve to the launch folder. gh-dash REQUIRES an exact "owner/repo" key to
-    # map to a literal path (a wildcard key like "*/*" would have to map to a
-    # wildcard path, which can't point everything at one dir). So inject the
-    # exact key only — which is exactly the repo we're scoped to. config.yml
-    # itself defines no repoPaths, so there's no duplicate key.
+    # Map "owner/repo" -> launch folder so checkout/{{.RepoPath}} resolve there
+    # (gh-dash needs an exact key, not a wildcard).
     if [[ -n "$repo" && -n "${GHME_LAUNCH_DIR:-}" ]]; then
       printf '\nrepoPaths:\n  "%s": "%s"\n' "$repo" "$GHME_LAUNCH_DIR"
     fi
   }
 }
 
-# review: launch with "Needs My Review" as the only/first PR section.
+# review: launch with "Needs My Review" as the first PR section.
 if [[ "${1:-}" == "review" ]]; then
   launch_with_config <<'EOF'
 prSections:
@@ -159,8 +146,7 @@ defaults:
 EOF
 fi
 
-# update-all: merge each open PR's base branch into it (the "Update branch"
-# button — a merge, never a rebase), reporting which branches now conflict.
+# update-all: merge each open PR's base into it, reporting conflicts.
 if [[ "${1:-}" == "update-all" ]]; then
   echo "Updating every open PR you authored with its base branch (merge, no rebase)…"
   echo
@@ -194,10 +180,7 @@ if [[ "${1:-}" == "repo" ]]; then
     echo "ghme: current directory is not a GitHub repo." >&2
     exit 1
   fi
-  # Process substitution (not a pipe) so launch_with_config runs in THIS shell
-  # and its `exec` replaces ghme. A pipe would run it in a subshell, the exec
-  # would only replace the subshell, and ghme would fall through to the final
-  # `exec gh dash` below — opening a second dashboard underneath.
+  # Process substitution, not a pipe, so launch_with_config's `exec` replaces ghme.
   launch_with_config < <(emit_repo_scoped_config "$repo")
 fi
 
@@ -216,7 +199,7 @@ if [[ "${1:-}" == "search" ]]; then
   exit 0
 fi
 
-# discussions: gh-dash can't show Discussions, so query GraphQL directly.
+# discussions: gh-dash can't show Discussions; query GraphQL directly.
 if [[ "${1:-}" == "discussions" ]]; then
   repo="${2:-apache/texera}"
   owner="${repo%%/*}"
@@ -255,13 +238,10 @@ if ! gh extension list 2>/dev/null | grep -q 'gh dash'; then
   exit 1
 fi
 
-# Plain `ghme` (no args): generate a config so we can (a) auto-scope to the
-# current repo when inside one, and (b) inject repoPaths so checkout lands in
-# the launch folder. Outside a repo, repo="" → unscoped, but repoPaths is still
-# injected. With args, pass through to gh dash unchanged.
+# Plain `ghme` (no args): auto-scope to the current repo if inside one.
 if [[ $# -eq 0 ]]; then
   repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || repo=""
-  # Process substitution, not a pipe — see the note in the `repo` block above.
+  # Process substitution, not a pipe (see the `repo` block above).
   launch_with_config < <(emit_repo_scoped_config "$repo")
 fi
 

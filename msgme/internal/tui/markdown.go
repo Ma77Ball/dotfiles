@@ -6,10 +6,7 @@ import (
 	"github.com/charmbracelet/glamour"
 )
 
-// renderMarkdown renders an item body as styled terminal markdown for the
-// sidebar, matching gh-dash's glamour-based preview. It uses a fixed dark style
-// (rather than auto-detecting) so it never blocks on a terminal query, and
-// falls back to the raw text if rendering fails.
+// renderMarkdown renders body as terminal markdown, falling back to raw text on error.
 func renderMarkdown(body string, width int) string {
 	body = strings.TrimSpace(body)
 	if body == "" {

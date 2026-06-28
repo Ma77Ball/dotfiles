@@ -1,22 +1,9 @@
-# Set the terminal title to the current git branch when inside a repo,
-# otherwise fall back to the working directory (Ghostty's default-ish title).
-#
-# The prompt hook (__ghostty_set_title) refreshes the title every time a new
-# prompt is drawn. On its own that only catches branch changes you make AT the
-# prompt — if the branch changes while a foreground program is running (an
-# editor, a dev server, `claude` doing checkouts, another pane in the same
-# repo...) no prompt is drawn, so the title goes stale until you hit Enter.
-#
-# To update "anytime the branch changes", a per-shell background watcher tails
-# the repo's .git/HEAD (whose contents flip on every branch switch / detach)
-# and pushes the new title straight to this shell's terminal between prompts.
-#
-# This is self-contained: it also neutralizes — in the current shell — the
-# things that would otherwise clobber our title, so it works in already-open
-# Ghostty windows WITHOUT restarting Ghostty. Just `source` this file.
+# Set the terminal title to the current git branch (else the working dir).
+# A prompt hook updates it each prompt; a background HEAD watcher also updates it
+# when the branch changes while a foreground program is running. Source this file.
 
-# Compute the title for a given directory ($1, default $PWD): the git branch
-# (or short SHA when detached), else the directory with $HOME shortened to ~.
+# Title for a directory ($1, default $PWD): git branch (short SHA if detached),
+# else the directory with $HOME shortened to ~.
 __ghostty_title_string() {
     local dir="${1:-$PWD}" branch
     branch=$(git -C "$dir" branch --show-current 2>/dev/null)
@@ -33,7 +20,7 @@ __ghostty_title_string() {
 }
 
 # --- background HEAD watcher -------------------------------------------------
-# State (per shell). The watcher PID and the git dir it is currently watching.
+# Per-shell state: the watcher PID and the git dir it watches.
 __ghostty_watch_pid=""
 __ghostty_watch_gitdir=""
 
@@ -47,23 +34,18 @@ __ghostty_watch_stop() {
     __ghostty_watch_gitdir=""
 }
 
-# The loop that runs in the background. Args: shell-pid tty git-dir repo-top.
-# It blocks on HEAD changing (event-driven via inotifywait, else polling) and
-# re-emits the title to $tty. It also re-checks that the owning shell is still
-# alive each iteration, so it cleans itself up if the shell is killed (-9) and
-# the EXIT trap never runs.
+# Background loop (args: shell-pid tty git-dir repo-top). Blocks on HEAD changing
+# (inotifywait, else polling), re-emits the title to $tty, and exits when the
+# owning shell dies.
 __ghostty_watch_loop() {
     local shellpid=$1 tty=$2 gitdir=$3 repo=$4
     local head="$gitdir/HEAD" last cur
     last=$(cat "$head" 2>/dev/null)
     while kill -0 "$shellpid" 2>/dev/null; do
         if command -v inotifywait >/dev/null 2>&1; then
-            # Watch the git dir (HEAD is replaced via rename on checkout, so
-            # watching the file directly would lose the inode). A checkout fires
-            # several events (index, HEAD, ORIG_HEAD...) and this one-shot wait
-            # returns on the first, which may be before HEAD is rewritten — so
-            # the short 1s timeout also serves as a poll that reliably converges
-            # to the current branch, and as a chance to re-check the shell.
+            # Watch the git dir, not HEAD (checkout renames HEAD, losing the
+            # inode). The 1s timeout doubles as a poll so we converge even when
+            # the event fires before HEAD is rewritten, and re-checks the shell.
             inotifywait -q -t 1 -e modify,create,moved_to,close_write \
                 "$gitdir" >/dev/null 2>&1
         else
@@ -76,8 +58,8 @@ __ghostty_watch_loop() {
     done
 }
 
-# Point the watcher at the repo for the current directory, (re)starting it only
-# when the repo actually changes. Stops the watcher when outside any repo.
+# Point the watcher at the current directory's repo, (re)starting it only when the
+# repo changes; stop it when outside any repo.
 __ghostty_watch_sync() {
     [ -n "$__ghostty_tty" ] || return       # no terminal to write to
     local gitdir
@@ -103,19 +85,16 @@ __ghostty_watch_sync() {
 __ghostty_set_title() {
     # --- one-time per shell: stop everything else from setting the title ---
     if [ -z "${__ghostty_title_fixed-}" ]; then
-        # Ghostty's "title" shell feature appends an OSC-2 escape to PS1 that
-        # prints the cwd as the title — and PS1 renders AFTER PROMPT_COMMAND, so
-        # nothing in PROMPT_COMMAND can beat it. Strip that escape out of PS1.
+        # Strip Ghostty's cwd-title OSC escape from PS1 (PS1 renders after
+        # PROMPT_COMMAND, so it would otherwise win).
         local _needle='\[\e]2;\w\a\]'
         PS1="${PS1//"$_needle"/}"
 
-        # Ghostty's preexec sets the title to the running command; it checks for
-        # "title" in this var. Remove it so only we touch the title.
+        # Disable Ghostty's preexec title feature so only we set the title.
         GHOSTTY_SHELL_FEATURES="${GHOSTTY_SHELL_FEATURES/title/}"
         export GHOSTTY_SHELL_FEATURES
 
-        # Drop any leftover WezTerm precmd hooks (OSC user-vars / osc7) that were
-        # loaded by /etc/profile.d/wezterm.sh before we could skip it.
+        # Drop leftover WezTerm precmd hooks that would also clobber the title.
         if [ -n "${precmd_functions+x}" ]; then
             local _pf=() _f
             for _f in "${precmd_functions[@]}"; do
@@ -132,11 +111,9 @@ __ghostty_set_title() {
     __ghostty_watch_sync
 }
 
-# One-time, at source time (when fd 0 is still the terminal): remember this
-# shell's tty so the background watcher knows where to write, and tear the
-# watcher down when the shell exits. Doing this here rather than inside the
-# prompt hook matters — PROMPT_COMMAND often runs with stdin redirected away
-# from the terminal, so `tty` there returns nothing.
+# One-time at source time (fd 0 is still the terminal): record this shell's tty
+# for the watcher and tear it down on exit. Done here, not in the prompt hook,
+# since PROMPT_COMMAND often runs with stdin redirected so `tty` returns nothing.
 if [ -z "${__ghostty_installed-}" ]; then
     __ghostty_tty=$(tty 2>/dev/null)
     case $__ghostty_tty in

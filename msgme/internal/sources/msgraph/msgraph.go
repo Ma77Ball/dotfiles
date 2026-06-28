@@ -1,13 +1,6 @@
-// Package msgraph implements sources.Source for Microsoft Graph, covering both
-// Outlook mail and Microsoft Teams chats from a single OAuth login.
-//
-// Auth is the OAuth2 device-code flow against Azure AD (run `msgme login ms`).
-// Register a free app at https://portal.azure.com -> App registrations:
-//   - Supported account types: personal + work/school ("common") is fine.
-//   - Authentication -> "Allow public client flows" = Yes (enables device code).
-//   - API permissions (delegated): User.Read, Mail.Read, Mail.Send, Chat.Read,
-//     ChatMessage.Send, offline_access.
-// Then put the Application (client) ID in config under msgraph.clientID.
+// Package msgraph implements sources.Source for Microsoft Graph (Outlook mail +
+// Teams chats) from one OAuth login. Auth uses the device-code flow against
+// Azure AD (msgme login ms).
 package msgraph
 
 import (
@@ -27,7 +20,7 @@ import (
 
 const graphBase = "https://graph.microsoft.com/v1.0"
 
-// Name is the source/login identifier used on disk and on the command line.
+// Name is the source/login identifier.
 const Name = "ms"
 
 // Scopes requested at login.
@@ -37,8 +30,7 @@ var Scopes = []string{
 	"Chat.Read", "ChatMessage.Send",
 }
 
-// Config builds the OAuth2 config for the given app registration. tenant
-// defaults to "common" (personal + work/school accounts).
+// Config builds the OAuth2 config for the app registration; tenant defaults to "common".
 func Config(clientID, tenant string) *oauth2.Config {
 	if tenant == "" {
 		tenant = "common"
@@ -61,14 +53,14 @@ type Source struct {
 	sections []string
 }
 
+// handle carries per-item action data.
 type handle struct {
 	Kind   string // "mail" or "teams"
 	ID     string // message id
 	ChatID string // chat id (teams only)
 }
 
-// New builds the source from a configured client. Returns an error (so the
-// caller can surface "run msgme login ms") if no cached token exists.
+// New builds the source from a configured client; errors if no token is cached.
 func New(ctx context.Context, clientID, tenant string, sectionTitles []string) (*Source, error) {
 	if strings.TrimSpace(clientID) == "" {
 		return nil, fmt.Errorf("msgraph: no clientID (set msgraph.clientID in config)")
@@ -80,10 +72,10 @@ func New(ctx context.Context, clientID, tenant string, sectionTitles []string) (
 	return &Source{http: hc, sections: sectionTitles}, nil
 }
 
+// Name returns the source identifier.
 func (s *Source) Name() string { return "msgraph" }
 
-// SetupTab returns the placeholder tab the dashboard shows when Outlook/Teams
-// is not connected, explaining how to register an app and log in.
+// SetupTab returns the placeholder tab shown when Outlook/Teams is not connected.
 func SetupTab() sources.Section {
 	return sources.Section{Source: "msgraph", Title: "Outlook · Teams", Setup: setupHelp}
 }
@@ -104,6 +96,7 @@ One Microsoft login covers both. Register a free app:
 
 Verify any time with:  msgme doctor`
 
+// Sections maps configured titles to mail/teams section keys.
 func (s *Source) Sections() []sources.Section {
 	out := make([]sources.Section, 0, len(s.sections))
 	for _, title := range s.sections {
@@ -116,6 +109,7 @@ func (s *Source) Sections() []sources.Section {
 	return out
 }
 
+// Fetch dispatches on the section key.
 func (s *Source) Fetch(ctx context.Context, section sources.Section) ([]sources.Item, error) {
 	switch section.Key {
 	case "mail":
@@ -129,6 +123,7 @@ func (s *Source) Fetch(ctx context.Context, section sources.Section) ([]sources.
 
 // --- Outlook mail ---
 
+// mailResp is the Outlook messages response.
 type mailResp struct {
 	Value []struct {
 		ID          string `json:"id"`
@@ -146,6 +141,7 @@ type mailResp struct {
 	} `json:"value"`
 }
 
+// fetchMail returns unread inbox messages.
 func (s *Source) fetchMail(ctx context.Context, section sources.Section) ([]sources.Item, error) {
 	q := url.Values{}
 	q.Set("$filter", "isRead eq false")
@@ -180,6 +176,7 @@ func (s *Source) fetchMail(ctx context.Context, section sources.Section) ([]sour
 
 // --- Teams chats ---
 
+// chatsResp is the Teams chats response with last-message preview.
 type chatsResp struct {
 	Value []struct {
 		ID        string `json:"id"`
@@ -204,6 +201,7 @@ type chatsResp struct {
 	} `json:"value"`
 }
 
+// fetchTeams returns chats whose last message is unread.
 func (s *Source) fetchTeams(ctx context.Context, section sources.Section) ([]sources.Item, error) {
 	q := url.Values{}
 	q.Set("$expand", "lastMessagePreview")
@@ -252,6 +250,7 @@ func (s *Source) fetchTeams(ctx context.Context, section sources.Section) ([]sou
 
 // --- actions ---
 
+// MarkRead marks a mail message read; Teams chats are unsupported.
 func (s *Source) MarkRead(ctx context.Context, item sources.Item) error {
 	h, ok := item.Handle.(handle)
 	if !ok {
@@ -261,11 +260,12 @@ func (s *Source) MarkRead(ctx context.Context, item sources.Item) error {
 	case "mail":
 		return s.patch(ctx, "/me/messages/"+h.ID, map[string]any{"isRead": true})
 	default:
-		// Graph has no simple delegated "mark chat read" endpoint.
+		// no delegated mark-chat-read endpoint
 		return sources.ErrUnsupported
 	}
 }
 
+// Reply sends a mail reply or posts to a Teams chat.
 func (s *Source) Reply(ctx context.Context, item sources.Item, text string) error {
 	h, ok := item.Handle.(handle)
 	if !ok {
@@ -284,11 +284,13 @@ func (s *Source) Reply(ctx context.Context, item sources.Item, text string) erro
 
 // --- REST helpers ---
 
+// get does a GET and decodes the JSON body into out.
 func (s *Source) get(ctx context.Context, path string, out any) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, graphBase+path, nil)
 	return s.do(req, out)
 }
 
+// patch does a PATCH with a JSON body.
 func (s *Source) patch(ctx context.Context, path string, body any) error {
 	req, err := newJSONReq(ctx, http.MethodPatch, graphBase+path, body)
 	if err != nil {
@@ -297,6 +299,7 @@ func (s *Source) patch(ctx context.Context, path string, body any) error {
 	return s.do(req, nil)
 }
 
+// post does a POST with a JSON body, optionally decoding the response.
 func (s *Source) post(ctx context.Context, path string, body, out any) error {
 	req, err := newJSONReq(ctx, http.MethodPost, graphBase+path, body)
 	if err != nil {
@@ -305,6 +308,7 @@ func (s *Source) post(ctx context.Context, path string, body, out any) error {
 	return s.do(req, out)
 }
 
+// newJSONReq builds a request with a JSON-encoded body.
 func newJSONReq(ctx context.Context, method, url string, body any) (*http.Request, error) {
 	buf, err := json.Marshal(body)
 	if err != nil {
@@ -318,6 +322,7 @@ func newJSONReq(ctx context.Context, method, url string, body any) (*http.Reques
 	return req, nil
 }
 
+// do sends a request, returning a Graph error on >=400 and decoding out otherwise.
 func (s *Source) do(req *http.Request, out any) error {
 	resp, err := s.http.Do(req)
 	if err != nil {
@@ -345,6 +350,7 @@ func (s *Source) do(req *http.Request, out any) error {
 
 // --- small utils ---
 
+// parseTime parses an RFC3339 timestamp, returning zero on failure.
 func parseTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
@@ -356,6 +362,7 @@ func parseTime(s string) time.Time {
 	return t
 }
 
+// oneLine collapses text to a single trimmed line capped at 120 chars.
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.TrimSpace(s)
@@ -365,8 +372,7 @@ func oneLine(s string) string {
 	return s
 }
 
-// stripHTML removes tags from Teams message HTML for a readable preview. Good
-// enough for plain text; not a full sanitizer.
+// stripHTML removes tags from Teams message HTML for a plain-text preview.
 func stripHTML(s string) string {
 	var b strings.Builder
 	inTag := false
@@ -383,6 +389,7 @@ func stripHTML(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
+// sortByTimeDesc sorts items newest first (insertion sort).
 func sortByTimeDesc(items []sources.Item) {
 	for i := 1; i < len(items); i++ {
 		for j := i; j > 0 && items[j].Time.After(items[j-1].Time); j-- {

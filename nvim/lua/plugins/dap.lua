@@ -13,9 +13,8 @@ return {
       local dap = require("dap")
       local dapui = require("dapui")
 
-      -- Fixed debug layout so <F7> always opens to the same sizes:
-      --   left sidebar (50 cols): variables / call stack / watches / breakpoints
-      --   bottom tray (12 rows): REPL / program console
+      -- fixed UI layout: left sidebar (scopes/stacks/watches/breakpoints),
+      -- bottom tray (REPL/console)
       dapui.setup({
         layouts = {
           {
@@ -40,24 +39,21 @@ return {
       })
       require("nvim-dap-virtual-text").setup()
 
-      -- Auto-open the debug UI when a session starts. Do NOT auto-close on
-      -- finish: that wipes the console output instantly and the window reflow
-      -- blows up the neo-tree panel. Close it yourself with <F7> when done.
+      -- auto-open the UI on session start; close manually with <F7>
+      -- (no auto-close: it wipes console output and reflows neo-tree)
       dap.listeners.before.attach.dapui_config = function() dapui.open() end
       dap.listeners.before.launch.dapui_config = function() dapui.open() end
 
-      -- Breakpoint sign tweaks
+      -- breakpoint/stopped signs
       vim.fn.sign_define("DapBreakpoint", { text = "●", texthl = "DiagnosticSignError" })
       vim.fn.sign_define("DapStopped", { text = "▶", texthl = "DiagnosticSignWarn" })
 
-      -- Debug keymaps (function keys avoid clashing with the <leader>d
-      -- multiple-cursors mappings).
+      -- debug keymaps (function keys avoid the <leader>d multicursor mappings)
       vim.keymap.set("n", "<F5>", dap.continue, { desc = "Debug: start/continue" })
       vim.keymap.set("n", "<F10>", dap.step_over, { desc = "Debug: step over" })
       vim.keymap.set("n", "<F11>", dap.step_into, { desc = "Debug: step into" })
       vim.keymap.set("n", "<F12>", dap.step_out, { desc = "Debug: step out" })
-      -- <F7>: if the UI is open, close it; if closed, open it AND force the configured
-      -- layout sizes (reset = true) so it always snaps back to the defined sizes.
+      -- <F7>: toggle the UI; reopen forces the configured layout sizes
       vim.keymap.set("n", "<F7>", function()
         local open = false
         for _, w in ipairs(vim.api.nvim_list_wins()) do
@@ -71,7 +67,7 @@ return {
         dap.set_breakpoint(vim.fn.input("Breakpoint condition: "))
       end, { desc = "Debug: conditional breakpoint" })
 
-      -- JS / TS node debugging via js-debug-adapter (installed by Mason).
+      -- JS/TS node debugging via js-debug-adapter (installed by Mason)
       local js_debug = vim.fn.stdpath("data")
         .. "/mason/packages/js-debug-adapter/js-debug/src/dapDebugServer.js"
       dap.adapters["pwa-node"] = {

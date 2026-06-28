@@ -1,3 +1,4 @@
+-- telescope.nvim: fuzzy finder for files, buffers, grep, and help.
 return
 {
   "nvim-telescope/telescope.nvim",
@@ -18,10 +19,9 @@ return
       },
     })
 
-    -- optional but recommended
+    -- load the native fzf sorter
     pcall(telescope.load_extension, "fzf")
 
-    -- Quick file/buffer switching without neo-tree.
     local builtin = require("telescope.builtin")
     vim.keymap.set("n", "<leader>ff", builtin.find_files, { desc = "Find files" })
     vim.keymap.set("n", "<leader>fb", builtin.buffers, { desc = "Switch open buffers" })
