@@ -7,6 +7,9 @@
 #   obs       observability stack (VictoriaLogs/Metrics, Jaeger, Parca, OTel collector)
 #   app       sbt-built backend services + frontend, in a tmux session (live logs)
 #   app-be    backend services only (no frontend) — avoids the ng-serve file watcher
+#   rust      (re)build the native Rust worker (amber/amber-rs); the engine spawns
+#             it for any operator tagged rust:<op>. Built automatically on app start
+#             if missing; run this after editing amber/amber-rs to force a rebuild.
 #   dev       convenience = db + infra + app   (obs is separate, run `obs` on its own)
 #   debug     full debug pipeline: db + infra + backends + the Amber engine under JDWP
 #             on :5005, ready for :TexeraDebug in nvim (runs ./texera_debug)
@@ -56,6 +59,8 @@ SINGLE_NODE="$ROOT/bin/single-node"                                        # ful
 OBS_COMPOSE="$ROOT/bin/observability/docker-compose.yml"                   # obs entry point (includes single-node)
 PG_CONTAINER="texera-dev-postgres"
 PG_IMAGE="docker.io/groonga/pgroonga:4.0.1-debian-15"                      # texera_ddl.sql needs pgroonga; FQ name for podman too
+RUST_WORKER_DIR="$ROOT/amber/amber-rs"                                     # nested Rust workspace (data-plane engine)
+RUST_WORKER_BIN="$RUST_WORKER_DIR/target/release/amber-worker"             # native worker the engine spawns for rust:<op> operators
 OBS_SERVICES=(otel-collector victorialogs victoriametrics jaeger parca parca-agent)
 OBS_PROFILES="observability-collector,observability-logs,observability-metrics,observability-traces,observability-profiles"
 DEV_BACKENDS=(config-service access-control-service file-service
@@ -256,6 +261,29 @@ ensure_built() {
   rebuild
 }
 
+# ---- rust worker (native data-plane engine) --------------------------------
+# Build the amber-worker binary the JVM engine spawns for any operator tagged
+# rust:<op>. Skipped (with a warning, not a hard fail) if cargo is missing so the
+# rest of the stack still comes up. Pass 'force' to rebuild even if present
+# (after editing amber/amber-rs). The engine finds it via AMBER_RUST_WORKER_BIN,
+# exported into the backend launch env by up_app/run_debug.
+ensure_rust_worker() {
+  local force="${1:-}"
+  if [[ "$force" != force && -x "$RUST_WORKER_BIN" ]]; then
+    ok "rust worker present ($RUST_WORKER_BIN)"; return 0
+  fi
+  if ! command -v cargo >/dev/null 2>&1; then
+    warn "cargo not found; skipping Rust worker build (rust:<op> operators will fail to start)"; return 1
+  fi
+  [[ -d "$RUST_WORKER_DIR" ]] || { warn "no Rust workspace at $RUST_WORKER_DIR; skipping"; return 1; }
+  # prost/tonic build scripts need protoc; prefer an explicit PROTOC, else the one on PATH.
+  local protoc="${PROTOC:-}"; [[ -z "$protoc" && -x /usr/bin/protoc ]] && protoc=/usr/bin/protoc
+  say "building Rust amber-worker (release)${force:+ [force]}..."
+  ( cd "$RUST_WORKER_DIR" && ${protoc:+env PROTOC="$protoc"} cargo build --release -p amber-net --bin amber-worker ) \
+    && ok "built $RUST_WORKER_BIN" \
+    || { warn "Rust worker build failed; rust:<op> operators will fail to start"; return 1; }
+}
+
 # ---- fresh (from-scratch install test) -------------------------------------
 # Simulates a clean machine: tear down the dev stack, drop the Postgres volume so
 # it re-inits from sql/, clean-rebuild the dist, then bring infra+app up.
@@ -443,6 +471,7 @@ up_app() {
   local with_frontend="${1:-yes}"   # pass 'no' to launch backend services only
   need tmux; require_jdk17 || true
   ensure_built
+  ensure_rust_worker || true   # native worker for rust:<op> operators (non-fatal if absent)
   local java_env=""; [[ -n "$JDK17" ]] && java_env="JAVA_HOME='$JDK17'"
   local pyenv=""; [[ -x "$ROOT/../venv312/bin/python" ]] && pyenv="UDF_PYTHON_PATH='$ROOT/../venv312/bin/python'"
   # Services resolve their yaml under $TEXERA_HOME; pin it to the repo root or an
@@ -451,6 +480,9 @@ up_app() {
   # Backend log level (default TRACE); export TEXERA_SERVICE_LOG_LEVEL to override.
   # Forwarded via env since tmux windows don't inherit the caller's shell env.
   local log_env="TEXERA_SERVICE_LOG_LEVEL='${TEXERA_SERVICE_LOG_LEVEL:-TRACE}'"
+  # Point the engine at the native Rust worker (absolute path, so it resolves
+  # regardless of each service's cwd). Empty if the build was skipped.
+  local rust_env=""; [[ -x "$RUST_WORKER_BIN" ]] && rust_env="AMBER_RUST_WORKER_BIN='$RUST_WORKER_BIN'"
   # Wait for lakeFS if it's up so file-service doesn't crash racing it; no-op
   # otherwise (e.g. app-be without infra).
   running_container texera-lakefs-lakefs && wait_for_lakefs || true
@@ -458,7 +490,7 @@ up_app() {
   for n in "${DEV_BACKENDS[@]}"; do
     path="$(launcher "$n")"
     [[ -n "$path" ]] || { warn "no launcher for $n — skipping"; continue; }
-    launch "$n" "${path%/target/*}" "env $home_env $java_env $pyenv $log_env '$path'" ${SVC_PORTS[$n]:-}
+    launch "$n" "${path%/target/*}" "env $home_env $java_env $pyenv $log_env $rust_env '$path'" ${SVC_PORTS[$n]:-}
     sleep 1; [[ "$n" == config-service ]] && sleep 2
   done
   if [[ "$with_frontend" == yes && -f "$ROOT/frontend/package.json" ]]; then
@@ -503,6 +535,7 @@ status() {
   find_jdk17
   say "Texera status"
   echo "  JDK 17:     ${JDK17:-${c_red}none, getSubject will fail on 24+${c_off}}"
+  printf "  rust wkr:   "; [[ -x "$RUST_WORKER_BIN" ]] && echo "${c_grn}built${c_off} ($RUST_WORKER_BIN)" || echo "${c_yel}not built${c_off} (texera_start rust)"
   detect_ce >/dev/null 2>&1
   printf "  engine:     "; [[ -n "$CE" ]] && echo "${c_grn}$CE${c_off}" || echo "${c_red}none (no docker daemon / podman)${c_off}"
   local c
@@ -541,13 +574,15 @@ run_debug() {
   done
   local L; L="$(launcher computing-unit-master)"
   [[ -n "$L" ]] || die "no computing-unit-master launcher (run: texera_start rebuild)"
+  # The engine (this process) spawns the native Rust worker for rust:<op> ops.
+  local rust_env=""; [[ -x "$RUST_WORKER_BIN" ]] && rust_env="AMBER_RUST_WORKER_BIN='$RUST_WORKER_BIN'"
   say "relaunching the engine under the debugger (JDWP :$port)..."
   local p
   for p in 8085 2552 "$port"; do port_open "$p" && free_port "$p"; done
   sleep 2
   ensure_session
   tmux new-window -t "$SESSION" -n cum-debug -c "$ROOT/amber" \
-    "env TEXERA_HOME='$ROOT' JAVA_HOME='$JDK17' '$L' -jvm-debug $port"
+    "env TEXERA_HOME='$ROOT' JAVA_HOME='$JDK17' $rust_env '$L' -jvm-debug $port"
   for i in $(seq 1 60); do port_open "$port" && break; sleep 1; done
   echo
   if port_open "$port"; then ok "engine running under the debugger - JDWP on localhost:$port"
@@ -570,9 +605,10 @@ start_target() {
     obs|observability) up_obs ;;
     app)   up_app yes ;;
     app-be|backend) up_app no ;;
+    rust)  ensure_rust_worker force ;;
     docker|single) run_docker ;;
     k8s|kubernetes)  run_k8s ;;
-    *) die "unknown target: $1 (db|infra|obs|app|app-be|dev|debug|docker|k8s)" ;;
+    *) die "unknown target: $1 (db|infra|obs|app|app-be|rust|dev|debug|docker|k8s)" ;;
   esac
 }
 stop_target() {
@@ -600,7 +636,7 @@ expand_targets() {
     esac
   done
   # unique, in canonical order (app-be before app so backend-only wins if both given)
-  local order=(db infra obs app-be app docker k8s) o
+  local order=(db infra obs rust app-be app docker k8s) o
   for o in "${order[@]}"; do printf '%s\n' "${out[@]}" | grep -qx "$o" && echo "$o"; done
 }
 
@@ -610,7 +646,7 @@ case "$cmd" in
   ""|menu)
     echo "${c_cyn}Texera launcher${c_off} — targets (space-separated, e.g. 'obs' or 'db infra app' or 'dev'):"
     echo "  ${c_grn}db${c_off} postgres   ${c_grn}infra${c_off} minio+lakefs   ${c_grn}obs${c_off} observability   ${c_grn}app${c_off} services+frontend"
-    echo "  ${c_grn}app-be${c_off} backend only (no frontend)   ${c_grn}dev${c_off} = db+infra+app"
+    echo "  ${c_grn}app-be${c_off} backend only (no frontend)   ${c_grn}rust${c_off} (re)build native Rust worker   ${c_grn}dev${c_off} = db+infra+app"
     echo "  ${c_grn}debug${c_off} = full pipeline, engine under JDWP on :5005 (then :TexeraDebug in nvim)"
     echo "  ${c_grn}docker${c_off} single-node    ${c_grn}k8s${c_off} helm"
     echo "  ${c_grn}fresh${c_off} = wipe DB + clean rebuild + start dev (from-scratch install test)"

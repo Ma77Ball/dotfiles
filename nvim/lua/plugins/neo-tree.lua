@@ -54,6 +54,31 @@ return {
       m["s"]    = { "open_split",  config = { keep_focus = true } }
       m["v"]    = { "open_vsplit", config = { keep_focus = true } }
 
+      -- open the file under the cursor in the browser (images/pdf/html/svg).
+      -- Key must be the resolved leader (" o"): neo-tree maps via
+      -- nvim_buf_set_keymap, which does NOT expand "<leader>".
+      m[(vim.g.mapleader or "\\") .. "o"] = function(state)
+        local node = state.tree:get_node()
+        if node and node.type == "file" then
+          local file = node.path or node:get_id()
+          -- follow $BROWSER (your default), then brave, then the system opener
+          local browser = vim.env.BROWSER
+          if (not browser or browser == "") and vim.fn.executable("brave-browser") == 1 then
+            browser = "brave-browser"
+          end
+          if browser and browser ~= "" then
+            vim.fn.jobstart({ browser, file }, { detach = true })
+          elseif vim.fn.executable("xdg-open") == 1 then
+            vim.fn.jobstart({ "xdg-open", file }, { detach = true })
+          else
+            vim.ui.open(file)
+          end
+          vim.notify("opened in browser: " .. vim.fn.fnamemodify(file, ":t"))
+        else
+          vim.notify("neo-tree: cursor is not on a file", vim.log.levels.INFO)
+        end
+      end
+
       return opts
     end,
   },

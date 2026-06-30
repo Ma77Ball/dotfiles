@@ -42,3 +42,6 @@ vim.keymap.set('n', '<leader>w', function()
   vim.wo.wrap = not vim.wo.wrap
   print("wrap " .. (vim.wo.wrap and "on" or "off"))
 end, { desc = 'Toggle line wrap' })
+
+-- Tabs (tn/tc are taken by Python DAP debug mappings).
+vim.keymap.set("n", "<leader>tt", "<cmd>tabnew<cr>",   { desc = "Tab: new" })

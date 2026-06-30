@@ -189,6 +189,18 @@ if [ -d "$DIR/bin" ]; then
     done
 fi
 
+echo "--- Installing Claude Code skills ---"
+# Symlink each skill in dotfiles/claude/skills into ~/.claude/skills, leaving any
+# machine-local skills already there untouched.
+if [ -d "$DIR/claude/skills" ]; then
+    mkdir -p "$HOME/.claude/skills"
+    for skill in "$DIR"/claude/skills/*/; do
+        [ -d "$skill" ] || continue
+        name="$(basename "$skill")"
+        create_symlink "${skill%/}" "$HOME/.claude/skills/$name"
+    done
+fi
+
 echo "--- Configuring Neovim ---"
 create_symlink "$DIR/nvim" "$HOME/.config/nvim"
 

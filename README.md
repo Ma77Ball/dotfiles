@@ -48,6 +48,7 @@ flowchart TD
 | `ghme/` | A **third-party fork** of `gh-dash` (the GitHub dashboard). Left as upstream code. |
 | `nvim/` | Neovim (text editor) configuration. |
 | `ghostty/` | Configuration for the Ghostty terminal emulator. |
+| `claude/skills/` | Claude Code skills, symlinked into `~/.claude/skills`. |
 | `bashrc.d/` | Bits of shell setup loaded by `.bashrc`. |
 | `custom_apps/`, `Icons/` | Desktop launcher entries and their icons. |
 | `*-config/`, `gh-dash/` | Runtime config files the tools read at startup. |
@@ -82,6 +83,7 @@ Key links it creates:
 | `msgme-config/` | `~/.config/msgme` |
 | `bin/*` | `~/.local/bin/*` |
 | `bashrc.d/ghostty-title.sh` | `~/.bashrc.d/` |
+| `claude/skills/*` | `~/.claude/skills/*` |
 
 ---
 
