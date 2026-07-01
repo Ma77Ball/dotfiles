@@ -6,9 +6,11 @@ return {
   dependencies = { "3rd/image.nvim" },
   ft = { "markdown" },
   config = function()
-    -- point mmdc's puppeteer at the system Chrome (chromium download skipped)
+    -- point mmdc's puppeteer at Brave (chromium download skipped). Puppeteer's
+    -- bundled Chrome is often a version mmdc can't find ("Could not find
+    -- Chrome ..."), so drive the installed Brave binary instead.
     vim.env.PUPPETEER_EXECUTABLE_PATH = vim.env.PUPPETEER_EXECUTABLE_PATH
-      or "/usr/bin/google-chrome"
+      or "/opt/brave.com/brave/brave"
 
     -- CursorHoldI fires after `updatetime` ms; lower it for snappier refresh
     if vim.o.updatetime > 700 then
