@@ -42,7 +42,7 @@ flowchart TD
 | Folder | What it is |
 | --- | --- |
 | `install.sh` | The one-shot installer. Detects the package manager, installs deps, symlinks configs, builds tools. |
-| `bin/` | Small shell scripts that wrap and glue tools together (the `ghme*` family, `texera_start`). |
+| `bin/` | Small shell scripts that wrap and glue tools together (the `ghme*` family, `texera`). |
 | `msgme/` | A custom terminal app: one inbox for Slack, Google Calendar, and Outlook/Teams. |
 | `todome/` | A custom terminal app: a keyboard-driven todo list. |
 | `ghme/` | A **third-party fork** of `gh-dash` (the GitHub dashboard). Left as upstream code. |
@@ -149,7 +149,7 @@ These are short shell scripts that make daily workflows one command instead of t
 | `ghme-comments` | Renders a PR/issue conversation (reviews + inline code comments) in a readable paged layout. |
 | `ghme-rebuild` | Rebuilds the vendored `gh-dash` and installs it as the `gh dash` binary. |
 | `ghme-rerun-ci` | Retriggers a PR's CI by pushing an empty commit. |
-| `texera_start` | A composable launcher for the Texera project (database, infra, app, dev/debug, docker/k8s), pinning JDK 17 + Node 24. |
+| `texera` | A composable launcher for the Texera project (database, infra, app, dev/debug, docker/k8s), pinning JDK 17 + Node 24. |
 
 ---
 

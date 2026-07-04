@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# start_app.sh — Texera launcher. Composable targets; pins builds/runs to JDK 17.
+# texera — Texera launcher. Composable targets; pins builds/runs to JDK 17.
 #
 # Targets (start one or more at once):
 #   db        dev postgres (pgroonga) on :5432  — texera_db + texera_iceberg_catalog
@@ -14,6 +14,18 @@
 #   debug     full debug pipeline: db + infra + backends + the Amber engine under JDWP
 #             on :5005, ready for :TexeraDebug in nvim (runs ./texera_debug)
 #   docker    single-node, everything in containers (bin/single-node)
+#   multi     this checkout as an isolated, proxied instance so several
+#             checkouts run at once with no port juggling. Each is its own
+#             compose project (named after the folder); a shared Traefik proxy
+#             on :80 routes http://<folder>.localhost to its UI. Sub-modes:
+#             'multi fresh' wipes this instance's volumes (DB re-inits from this
+#             branch's sql/); 'multi down' stops it. See bin/texera-multi/.
+#   box       docker-in-docker dev container per checkout. 'box up' builds/starts
+#             '<folder>-dev' (full toolchain + its own inner dockerd) with the
+#             source bind-mounted; afterwards every 'texera <target>' runs
+#             INSIDE it against your real code (fresh/refresh/db/infra/obs/docker
+#             all isolated per checkout). Proxy routes http://<folder>.localhost
+#             to the box's ng-serve. box down|rm|shell|status|chown|build.
 #   k8s       helm install into the current kube context (prod values)
 #   fresh     full from-scratch install test: stop everything, wipe the dev DB
 #             volume (re-inits from sql/), clean-rebuild the dist, then start dev
@@ -21,13 +33,13 @@
 #             build, WITHOUT wiping any data (use after backend code changes)
 #
 # Usage:
-#   ./start_app.sh <target...>        start targets, e.g. `./start_app.sh obs` or `./start_app.sh db infra app`
-#   ./start_app.sh stop [target...]   stop targets (no target = stop db+infra+obs+app)
-#   ./start_app.sh rebuild [clean]    stop app, then clean sbt dist on JDK 17, unzip launchers (clean by default)
-#   ./start_app.sh free-ports         kill whatever is holding the app/frontend ports
-#   ./start_app.sh status             show what is up
-#   ./start_app.sh attach             attach to the app tmux logs (Ctrl-b n/p switch, Ctrl-b d detach)
-#   ./start_app.sh                    interactive: pick targets (space-separated)
+#   texera <target...>        start targets, e.g. `texera obs` or `texera db infra app`
+#   texera stop [target...]   stop targets (no target = stop db+infra+obs+app)
+#   texera rebuild [clean]    stop app, then clean sbt dist on JDK 17, unzip launchers (clean by default)
+#   texera free-ports         kill whatever is holding the app/frontend ports
+#   texera status             show what is up
+#   texera attach             attach to the app tmux logs (Ctrl-b n/p switch, Ctrl-b d detach)
+#   texera                    interactive: pick targets (space-separated)
 #
 # Auto-selects JDK 17 (TEXERA_JAVA_HOME or an sdkman 17*) for builds/launches; JDK
 # 24+ breaks Hadoop/Iceberg (Subject.getSubject removed).
@@ -50,7 +62,12 @@ _find_root() {
   done
   return 1
 }
-ROOT="$(_find_root)" || die "texera_start: not inside a Texera checkout (no build.sbt above $PWD). cd into texera / texera2 / texera3 first."
+ROOT="$(_find_root)" || die "texera: not inside a Texera checkout (no build.sbt above $PWD). cd into texera / texera2 / texera3 first."
+
+# This script's own dir, so `multi` can find bin/texera-multi/ (proxy + overlay)
+# regardless of the caller's cwd.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MULTI_DIR="$SELF_DIR/texera-multi"
 
 # ---- topology --------------------------------------------------------------
 SESSION="texera-dev"
@@ -236,9 +253,54 @@ free_ports() {
   [[ $any -eq 0 ]] && ok "all app ports already free (${APP_PORTS[*]})"
 }
 
+# ---- protoc (python betterproto codegen) -----------------------------------
+# The sbt build's genPythonProto step runs bin/python-proto-gen.sh, which needs
+# protoc AND the well-known types (google/protobuf/*.proto) on protoc's include
+# path (it derives that path as <dir-of-protoc>/../include). The official protoc
+# release bundles them; a distro protoc (e.g. Ubuntu protobuf-compiler without
+# libprotobuf-dev, as in the dev box) ships only the binary, so the build dies
+# "google/protobuf/descriptor.proto: File not found". If the types aren't
+# resolvable, install the pinned official release into /usr/local so its
+# /usr/local/bin/protoc wins on PATH and its /usr/local/include has the types.
+protoc_wkt_ok() {
+  local d
+  for d in "$(dirname "$(dirname "$(command -v protoc 2>/dev/null)")")/include" \
+           /usr/local/include /usr/include; do
+    [[ -f "$d/google/protobuf/descriptor.proto" ]] && return 0
+  done
+  return 1
+}
+ensure_protoc() {
+  command -v protoc >/dev/null 2>&1 || return 0   # no protoc: the build skips python proto-gen, nothing to fix
+  protoc_wkt_ok && return 0
+  command -v curl >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1 \
+    || { warn "protoc lacks the well-known types and curl/unzip are unavailable; python proto-gen will fail. Install libprotobuf-dev or the official protoc."; return 1; }
+  local ver=""; [[ -f "$ROOT/bin/protoc-version.txt" ]] && ver="$(tr -d '[:space:]' < "$ROOT/bin/protoc-version.txt")"
+  [[ -n "$ver" ]] || { warn "no bin/protoc-version.txt; cannot auto-install protoc"; return 1; }
+  local arch; case "$(uname -m)" in
+    x86_64|amd64)   arch=x86_64 ;;
+    aarch64|arm64)  arch=aarch_64 ;;
+    *) warn "unknown arch $(uname -m); install the official protoc $ver by hand"; return 1 ;;
+  esac
+  if [[ ! -w /usr/local/bin && "$(id -u)" != 0 ]]; then
+    warn "protoc lacks the well-known types; install the official protoc $ver into /usr/local (needs root) or 'apt install libprotobuf-dev'"
+    return 1
+  fi
+  say "installing official protoc $ver into /usr/local (bundles google/protobuf/*.proto)"
+  local url="https://github.com/protocolbuffers/protobuf/releases/download/v${ver}/protoc-${ver}-linux-${arch}.zip"
+  local zip="/tmp/texera-protoc-$$.zip"
+  if curl -fsSL -o "$zip" "$url" && unzip -oq "$zip" -d /usr/local; then
+    chmod +x /usr/local/bin/protoc 2>/dev/null; rm -f "$zip"; hash -r 2>/dev/null || true
+    protoc_wkt_ok && ok "protoc $ver installed (/usr/local)" || { warn "protoc install did not supply the well-known types"; return 1; }
+  else
+    rm -f "$zip"; warn "could not download/install protoc $ver from $url"; return 1
+  fi
+}
+
 # ---- rebuild ---------------------------------------------------------------
 rebuild() {
   need sbt; need unzip; require_jdk17 || die "rebuild needs JDK 17"
+  ensure_protoc || true   # make the well-known protos resolvable, else python proto-gen fails the build
   local mode="${1:-}"
   local -a cmds=(); [[ -n "$mode" ]] && cmds+=("$mode"); cmds+=(dist)
   say "sbt ${cmds[*]} (JDK 17) — this takes a few minutes…"
@@ -252,6 +314,29 @@ rebuild() {
   while IFS= read -r z; do unzip -oq "$z" -d "$(dirname "$z")/.."; ok "$(basename "$z")"; done \
     < <(find "$ROOT" -maxdepth 6 -path '*/target/universal/*.zip' ! -path '*/common/*' ! -path '*/node_modules/*' 2>/dev/null | sort)
   ok "rebuild complete"
+}
+# ---- python UDF venv (in-box only) -----------------------------------------
+# The dev box has no Python UDF runtime (the host venv isn't mounted), so Python
+# UDF operators die with ModuleNotFoundError (pyarrow/betterproto/...). Build a
+# venv from THIS checkout's amber/requirements.txt (cached in a box volume) and
+# point UDF_PYTHON_PATH at it. Re-installs only when requirements.txt changes.
+TEXERA_VENV="${TEXERA_VENV:-/opt/texera-venv}"
+ensure_py_venv() {
+  [[ -n "${TEXERA_DEV_CONTAINER:-}" ]] || return 0   # only meaningful inside a box
+  local req="$ROOT/amber/requirements.txt"
+  [[ -f "$req" ]] || { warn "no amber/requirements.txt; skipping Python UDF venv"; return 0; }
+  local sum; sum="$(md5sum "$req" 2>/dev/null | cut -d' ' -f1)"
+  if [[ -x "$TEXERA_VENV/bin/python" && "$(cat "$TEXERA_VENV/.reqsum" 2>/dev/null)" == "$sum" ]]; then
+    ok "Python UDF venv ready ($TEXERA_VENV)"; return 0
+  fi
+  say "setting up Python UDF venv from amber/requirements.txt (first time is slow)"
+  [[ -x "$TEXERA_VENV/bin/python" ]] || python3 -m venv "$TEXERA_VENV" || { warn "venv create failed"; return 1; }
+  "$TEXERA_VENV/bin/pip" install -q --upgrade pip >/dev/null 2>&1
+  if "$TEXERA_VENV/bin/pip" install -q -r "$req"; then
+    echo "$sum" > "$TEXERA_VENV/.reqsum"; ok "Python UDF venv ready ($TEXERA_VENV)"
+  else
+    warn "Python UDF venv install failed; Python UDFs will not run"; return 1
+  fi
 }
 ensure_built() {
   local missing=() n
@@ -315,7 +400,7 @@ run_fresh() {
   # Guard: up_db reuses whatever is on :5432. Having removed our own container,
   # anything still on :5432 is a foreign DB whose schema would poison codegen.
   if port_open 5432; then
-    die "fresh: something other than $PG_CONTAINER is already serving :5432 (we just removed ours). The build would generate JOOQ classes from that DB's schema, not this branch's sql/. Stop it first ($CE ps --filter publish=5432), then re-run 'texera_start fresh'."
+    die "fresh: something other than $PG_CONTAINER is already serving :5432 (we just removed ours). The build would generate JOOQ classes from that DB's schema, not this branch's sql/. Stop it first ($CE ps --filter publish=5432), then re-run 'texera fresh'."
   fi
   # Bring the wiped DB up first so codegen sees the fresh schema (postgres opens
   # :5432 only after sql/ init finishes, so up_db's wait guarantees it's loaded).
@@ -396,9 +481,9 @@ run_refresh() {
       missing="$(grep -oE "not found: value [A-Z_]+" "$log" | sed 's/not found: value //' | sort -u | paste -sd', ' -)"
       die "refresh build failed: JOOQ codegen is missing table(s) [$missing] from the dev DB.
   The auto schema-sync only ADDS new tables; a column change or rename to an
-  existing table needs a full reset. Fix with 'texera_start fresh' (WARNING:
+  existing table needs a full reset. Fix with 'texera fresh' (WARNING:
   this WIPES the dev DB), or apply the matching sql/updates/*.sql to the running
-  postgres by hand, then re-run 'texera_start refresh'."
+  postgres by hand, then re-run 'texera refresh'."
     fi
     die "refresh build failed, see the build output above (full log: $log)."
   fi
@@ -473,7 +558,13 @@ up_app() {
   ensure_built
   ensure_rust_worker || true   # native worker for rust:<op> operators (non-fatal if absent)
   local java_env=""; [[ -n "$JDK17" ]] && java_env="JAVA_HOME='$JDK17'"
-  local pyenv=""; [[ -x "$ROOT/../venv312/bin/python" ]] && pyenv="UDF_PYTHON_PATH='$ROOT/../venv312/bin/python'"
+  local pyenv=""
+  if [[ -n "${TEXERA_DEV_CONTAINER:-}" ]]; then
+    ensure_py_venv || true   # in-box: build/point at the box's own UDF venv
+    [[ -x "$TEXERA_VENV/bin/python" ]] && pyenv="UDF_PYTHON_PATH='$TEXERA_VENV/bin/python'"
+  else
+    [[ -x "$ROOT/../venv312/bin/python" ]] && pyenv="UDF_PYTHON_PATH='$ROOT/../venv312/bin/python'"
+  fi
   # Services resolve their yaml under $TEXERA_HOME; pin it to the repo root or an
   # unset value doubles the path and they die "config not found".
   local home_env="TEXERA_HOME='$ROOT'"
@@ -498,14 +589,40 @@ up_app() {
     # Prepend Node 24 to the frontend window's PATH; $PATH stays literal so it
     # expands in that shell.
     local node_env=""; [[ -n "$NODE24_BIN" ]] && node_env="PATH=$NODE24_BIN:\$PATH "
-    launch frontend "$ROOT/frontend" "${node_env}yarn start" ${SVC_PORTS[frontend]}
-    echo; ok "app launched — frontend http://localhost:4200  web API http://localhost:8080"
+    # The UI is reached from the Traefik proxy (a separate container), whether it
+    # runs in a box (proxy reaches it by name) or on the host (proxy reaches it via
+    # the docker host-gateway). Either way ng serve must bind 0.0.0.0 and accept the
+    # <folder>.localhost Host header. The repo's `start` wraps `ng serve` in
+    # `concurrently`, so flags appended to `yarn start` never reach ng; replicate
+    # it here with the flags on ng serve itself (keeping the y-websocket sidecar).
+    local fe_pre=""
+    local fe_cmd="npx concurrently --kill-others \"npx y-websocket\" \"ng serve --host 0.0.0.0 --disable-host-check\""
+    # The box mounts an empty node_modules volume, so install deps first (a near
+    # no-op once populated). Host runs already have node_modules.
+    [[ -x "$ROOT/frontend/node_modules/.bin/ng" ]] || fe_pre="yarn install && "
+    launch frontend "$ROOT/frontend" "${node_env}${fe_pre}${fe_cmd}" ${SVC_PORTS[frontend]}
+    register_ui_route   # http://<folder>.localhost -> this UI (host or box); no-op if no proxy
+    local proj; proj="$(multi_project)"
+    if [[ -n "${TEXERA_DEV_CONTAINER:-}" ]]; then
+      echo; ok "app launched: frontend via proxy at http://$proj.localhost , web API :8080 (in-box)"
+    else
+      echo; ok "app launched: frontend http://$proj.localhost (and http://localhost:4200)  web API http://localhost:8080"
+    fi
   else
     echo; ok "backend launched — web API http://localhost:8080 (frontend not started)"
   fi
-  echo "  logs: ./start_app.sh attach   stop: ./start_app.sh stop app"
+  echo "  logs: texera attach   stop: texera stop app"
 }
-down_app() { tmux kill-session -t "$SESSION" 2>/dev/null && ok "app services stopped" || ok "app not running"; }
+down_app() {
+  # Drop the host-app proxy route so http://<folder>.localhost stops 502'ing once
+  # ng is gone. Guarded to host-app routes (host.docker.internal) so it never
+  # clobbers a box route for the same folder.
+  if [[ -z "${TEXERA_DEV_CONTAINER:-}" ]]; then
+    local proj; proj="$(multi_project)"
+    [[ -n "$proj" ]] && grep -q "host.docker.internal" "$PROXY_DYNAMIC/$proj.yml" 2>/dev/null && remove_proxy_route "$proj"
+  fi
+  tmux kill-session -t "$SESSION" 2>/dev/null && ok "app services stopped" || ok "app not running"
+}
 attach()   { tmux has-session -t "$SESSION" 2>/dev/null || die "no app session running"; tmux attach -t "$SESSION"; }
 
 # ---- docker single-node ----------------------------------------------------
@@ -519,6 +636,223 @@ run_docker() {
   ok "UI http://localhost:8080 (texera/texera). logs: cd bin/single-node && $CE compose logs -f"
 }
 down_docker() { ensure_compose_engine; ( cd "$SINGLE_NODE" && "$CE" compose down ) && ok "single-node down"; }
+
+# ---- multi (many checkouts at once, behind one reverse proxy) ---------------
+# Run THIS checkout's full single-node stack as an isolated, proxied instance so
+# several checkouts (texera / texera2 / texera3 / ...) run simultaneously with
+# NO port juggling and NO code/port edits. Each instance is its own compose
+# project named after the folder; a shared Traefik proxy on :80 routes
+# http://<folder>.localhost to that instance's UI. See bin/texera-multi/.
+#
+# Fresh-like behaviour: the base compose bind-mounts THIS checkout's sql/ into
+# postgres, so wiping the instance's volumes ('multi fresh') re-inits the DB
+# from this branch's schema (the DB half of `texera fresh`). The services
+# themselves run from prebuilt ghcr images by default (fast); to run your local
+# Scala/frontend code instead, build local images and set IMAGE_REGISTRY/
+# IMAGE_TAG (see the note printed by 'multi').
+MULTI_PROXY="$MULTI_DIR/proxy.yml"
+MULTI_OVERLAY="$MULTI_DIR/instance.override.yml"
+PROXY_DYNAMIC="$MULTI_DIR/dynamic"   # Traefik file-provider routes (one .yml per instance)
+# folder name -> a safe compose project + hostname label (lowercase, [a-z0-9-])
+multi_project() { basename "$ROOT" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-'; }
+
+mc() {  # compose for this instance: project-scoped, base + overlay
+  local proj="$1"; shift
+  TX_PROJECT="$proj" TX_HOST="$proj.localhost" \
+    dc "$SINGLE_NODE/docker-compose.yml" -p "$proj" -f "$MULTI_OVERLAY" "$@"
+}
+ensure_proxy() {
+  need_ce; ensure_podman_socket
+  mkdir -p "$PROXY_DYNAMIC"   # bind-mounted into Traefik; must exist before 'up'
+  if running_container texera-proxy; then ok "reverse proxy already up (:80)"; return; fi
+  say "starting shared reverse proxy (Traefik on :80)"
+  "$CE" compose -f "$MULTI_PROXY" up -d && ok "proxy up (dashboard: http://localhost:8090)" \
+    || die "could not start the reverse proxy"
+}
+# Register/unregister a file-provider route: http://<proj>.localhost -> backend
+# container (resolved by name over the shared texera-proxy network).
+write_proxy_route() {  # proj  backend_host  backend_port
+  local proj="$1" host="$2" port="$3"
+  mkdir -p "$PROXY_DYNAMIC"
+  cat > "$PROXY_DYNAMIC/$proj.yml" <<EOF
+# Auto-generated by 'texera'. Routes http://$proj.localhost to $host:$port.
+http:
+  routers:
+    $proj:
+      rule: "Host(\`$proj.localhost\`)"
+      entryPoints: [web]
+      service: $proj
+  services:
+    $proj:
+      loadBalancer:
+        servers:
+          - url: "http://$host:$port"
+EOF
+  ok "route http://$proj.localhost -> $host:$port"
+}
+remove_proxy_route() { rm -f "$PROXY_DYNAMIC/$1.yml" 2>/dev/null && ok "route http://$1.localhost removed" || true; }
+# Point http://<folder>.localhost at THIS checkout's host `app` UI (ng serve on
+# the host :4200), reached from the proxy via the docker host-gateway. Best-effort:
+# needs a container engine + the shared proxy; skips quietly (UI still on :4200)
+# otherwise. No-op inside a box: box_up already wrote that route on the OUTER host.
+register_ui_route() {
+  [[ -z "${TEXERA_DEV_CONTAINER:-}" ]] || return 0
+  local proj; proj="$(multi_project)"; [[ -n "$proj" ]] || return 0
+  detect_ce >/dev/null 2>&1 || { warn "no container engine; UI at http://localhost:4200 (proxy route skipped)"; return 0; }
+  if ! running_container texera-proxy; then
+    say "starting shared reverse proxy (Traefik on :80)"
+    "$CE" compose -f "$MULTI_PROXY" up -d >/dev/null 2>&1 \
+      || { warn "could not start reverse proxy; UI at http://localhost:4200"; return 0; }
+  fi
+  ensure_host_resolves "$proj.localhost"
+  write_proxy_route "$proj" "host.docker.internal" 4200
+}
+# *.localhost must resolve to loopback for the browser/curl. Warn + offer an
+# /etc/hosts line if it doesn't (systemd-resolved usually handles it, but NSS
+# here does not, so curl/some browsers would fail without the hosts entry).
+ensure_host_resolves() {
+  local host="$1"
+  getent hosts "$host" >/dev/null 2>&1 && return 0
+  warn "$host does not resolve on this machine (NSS has no *.localhost rule)"
+  if grep -q "[[:space:]]$host\b" /etc/hosts 2>/dev/null; then return 0; fi
+  printf "  add '127.0.0.1 %s' to /etc/hosts now? [y/N] " "$host"
+  local ans; read -r ans
+  if [[ "$ans" =~ ^[Yy] ]]; then
+    echo "127.0.0.1 $host" | sudo tee -a /etc/hosts >/dev/null \
+      && ok "added $host to /etc/hosts" \
+      || warn "could not edit /etc/hosts; add '127.0.0.1 $host' by hand"
+  else
+    warn "skipped; the browser may still resolve $host via systemd-resolved. If not, add '127.0.0.1 $host' to /etc/hosts"
+  fi
+}
+run_multi() {
+  local mode="${1:-up}"
+  local proj; proj="$(multi_project)"
+  [[ -n "$proj" ]] || die "could not derive a project name from $ROOT"
+  [[ -f "$SINGLE_NODE/docker-compose.yml" ]] || die "no bin/single-node/docker-compose.yml in this checkout"
+  need_ce
+  case "$mode" in
+    down)
+      say "stopping instance '$proj'"
+      mc "$proj" down && ok "instance '$proj' stopped (data volumes kept)"
+      return ;;
+    fresh)
+      say "instance '$proj': wiping volumes (DB re-inits from this branch's sql/)"
+      mc "$proj" down --volumes >/dev/null 2>&1 && ok "volumes wiped" || ok "nothing to wipe" ;;
+    up) : ;;
+    *) die "unknown multi mode: $mode (up|fresh|down)" ;;
+  esac
+  ensure_proxy
+  ensure_host_resolves "$proj.localhost"
+  say "starting instance '$proj' (project=$proj, host=$proj.localhost)"
+  mc "$proj" up -d || die "compose up failed for '$proj'"
+  echo
+  ok "instance '$proj' up  ->  http://$proj.localhost   (login texera/texera)"
+  echo "  first boot pulls images (~5 min). logs: TX_PROJECT=$proj $CE compose -p $proj -f $SINGLE_NODE/docker-compose.yml -f $MULTI_OVERLAY logs -f"
+  echo "  stop: texera multi down    routes: http://localhost:8090"
+  echo "  local code (not ghcr): build local images tagged e.g. texera-local, then IMAGE_REGISTRY=texera-local IMAGE_TAG=dev texera multi"
+}
+down_multi() { run_multi down; }
+
+# ---- box (docker-in-docker dev container per checkout) ---------------------
+# The primary multi-checkout model: each checkout gets ONE long-lived,
+# privileged container ('<folder>-dev') built from bin/texera-multi/dev.Dockerfile
+# (full toolchain + its own inner dockerd). The checkout's source is bind-mounted
+# at the SAME path, so `texera <target>` execs into the box and runs the
+# EXISTING logic against your REAL code: fresh/refresh build your local code,
+# db/infra/obs/docker spin up in the box's own dockerd, fully isolated.
+#
+# Because each box has its own localhost + port space, nothing collides and no
+# ports change in code. A shared Traefik proxy routes http://<folder>.localhost
+# to that box's ng-serve (:4200). Once a box is running, plain `texera
+# <target>` auto-dispatches into it (escape with TEXERA_NO_BOX=1).
+DEV_DOCKERFILE="$MULTI_DIR/dev.Dockerfile"
+DEV_IMAGE="${TEXERA_DEV_IMAGE:-texera-dev:latest}"
+box_name() { local p; p="$(multi_project)"; [[ -n "$p" ]] && echo "$p-dev"; }
+
+box_build() {
+  need_ce
+  if [[ "${1:-}" != force ]] && "$CE" image inspect "$DEV_IMAGE" >/dev/null 2>&1; then
+    ok "dev image $DEV_IMAGE present ('box build force' to rebuild)"; return 0
+  fi
+  say "building dev image $DEV_IMAGE (toolchain + dind; slow the first time)"
+  "$CE" build -t "$DEV_IMAGE" -f "$DEV_DOCKERFILE" "$MULTI_DIR" \
+    && ok "built $DEV_IMAGE" || die "dev image build failed"
+}
+box_up() {
+  need_ce
+  local box proj; box="$(box_name)"; proj="$(multi_project)"
+  [[ -n "$proj" ]] || die "could not derive a box name from $ROOT"
+  ensure_proxy
+  ensure_host_resolves "$proj.localhost"
+  box_build
+  if running_container "$box"; then ok "box '$box' already running"
+  elif have_container "$box"; then say "starting existing box '$box'"; "$CE" start "$box" >/dev/null
+  else
+    say "creating box '$box' (privileged dind; real code bind-mounted at $ROOT)"
+    "$CE" run -d --name "$box" --privileged --restart unless-stopped \
+      --network texera-proxy \
+      -v "$ROOT:$ROOT" \
+      -v "$HOME/dotfiles/bin:/opt/dotbin:ro" \
+      -v "${box}-docker:/var/lib/docker" \
+      -v "${box}-ivy:/root/.ivy2" \
+      -v "${box}-sbt:/root/.sbt" \
+      -v "${box}-coursier:/root/.cache/coursier" \
+      -v "${box}-cargo:/usr/local/cargo" \
+      -v "${box}-nodemods:$ROOT/frontend/node_modules" \
+      -v "${box}-venv:$TEXERA_VENV" \
+      -e UDF_PYTHON_PATH="$TEXERA_VENV/bin/python" \
+      -w "$ROOT" -e TEXERA_HOME="$ROOT" \
+      "$DEV_IMAGE" >/dev/null || die "could not create box '$box'"
+  fi
+  # Register the proxy route (Traefik reaches the box by name over texera-proxy).
+  write_proxy_route "$proj" "$box" 4200
+  printf "  waiting for inner docker in '%s'" "$box"; local i
+  for i in $(seq 1 60); do "$CE" exec "$box" docker info >/dev/null 2>&1 && break; printf '.'; sleep 1; done; echo
+  "$CE" exec "$box" docker info >/dev/null 2>&1 \
+    && ok "box '$box' ready" \
+    || warn "inner docker not ready; check: $CE exec $box tail /var/log/dockerd.log"
+  echo
+  ok "box '$box' up. Run targets in it, e.g.:  texera fresh   (UI: http://$proj.localhost)"
+  echo "  shell: texera box shell    stop: texera box down    run on host instead: TEXERA_NO_BOX=1 texera <cmd>"
+}
+box_down() {
+  need_ce; local box proj; box="$(box_name)"; proj="$(multi_project)"
+  remove_proxy_route "$proj"   # drop the route so it doesn't 502 while the box is down
+  running_container "$box" && { "$CE" stop "$box" >/dev/null && ok "box '$box' stopped (volumes kept)"; } || ok "box '$box' not running"
+}
+box_rm() {
+  need_ce; local box proj; box="$(box_name)"; proj="$(multi_project)"
+  remove_proxy_route "$proj"
+  "$CE" rm -f "$box" >/dev/null 2>&1 && ok "removed box container '$box' (named volumes kept)" || ok "no box container '$box'"
+}
+box_shell() { need_ce; local box; box="$(box_name)"; running_container "$box" || die "box '$box' not running ('texera box up')"; "$CE" exec -it "$box" bash; }
+box_status() {
+  need_ce; local box; box="$(box_name)"
+  if running_container "$box"; then
+    ok "box '$box' running"
+    "$CE" exec "$box" docker ps --format '  inner: {{.Names}} ({{.Status}})' 2>/dev/null || true
+  else ok "box '$box' not running"; fi
+}
+# Build artifacts the root box writes into the bind-mounted source end up
+# root-owned on the host. Hand ownership back to the invoking user.
+box_chown() {
+  need_ce; local box; box="$(box_name)"; running_container "$box" || die "box '$box' not running"
+  say "restoring ownership of $ROOT to $(id -u):$(id -g)"
+  "$CE" exec "$box" chown -R "$(id -u):$(id -g)" "$ROOT" && ok "ownership restored"
+}
+run_box() {
+  case "${1:-up}" in
+    up|"")     box_up ;;
+    down|stop) box_down ;;
+    rm|remove) box_down; box_rm ;;
+    build)     shift; box_build "${1:-force}" ;;
+    shell|sh)  box_shell ;;
+    status)    box_status ;;
+    chown)     box_chown ;;
+    *) die "unknown box subcommand: ${1} (up|down|rm|build|shell|status|chown)" ;;
+  esac
+}
 
 # ---- kubernetes (helm, prod values) ----------------------------------------
 run_k8s() {
@@ -535,7 +869,7 @@ status() {
   find_jdk17
   say "Texera status"
   echo "  JDK 17:     ${JDK17:-${c_red}none, getSubject will fail on 24+${c_off}}"
-  printf "  rust wkr:   "; [[ -x "$RUST_WORKER_BIN" ]] && echo "${c_grn}built${c_off} ($RUST_WORKER_BIN)" || echo "${c_yel}not built${c_off} (texera_start rust)"
+  printf "  rust wkr:   "; [[ -x "$RUST_WORKER_BIN" ]] && echo "${c_grn}built${c_off} ($RUST_WORKER_BIN)" || echo "${c_yel}not built${c_off} (texera rust)"
   detect_ce >/dev/null 2>&1
   printf "  engine:     "; [[ -n "$CE" ]] && echo "${c_grn}$CE${c_off}" || echo "${c_red}none (no docker daemon / podman)${c_off}"
   local c
@@ -545,7 +879,7 @@ status() {
   printf "  app (tmux): "; tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -v '^_$' | paste -sd' ' - || echo "${c_dim}down${c_off}"
   local p busy=()
   for p in "${APP_PORTS[@]}"; do port_open "$p" && busy+=("$p"); done
-  printf "  app ports:  "; [[ ${#busy[@]} -eq 0 ]] && echo "${c_dim}all free${c_off}" || echo "${c_yel}in use: ${busy[*]}${c_off} (./start_app.sh free-ports)"
+  printf "  app ports:  "; [[ ${#busy[@]} -eq 0 ]] && echo "${c_dim}all free${c_off}" || echo "${c_yel}in use: ${busy[*]}${c_off} (texera free-ports)"
 }
 
 # ---- debug pipeline --------------------------------------------------------
@@ -573,7 +907,7 @@ run_debug() {
     [[ "$up" == 1 ]] && break; sleep 2
   done
   local L; L="$(launcher computing-unit-master)"
-  [[ -n "$L" ]] || die "no computing-unit-master launcher (run: texera_start rebuild)"
+  [[ -n "$L" ]] || die "no computing-unit-master launcher (run: texera rebuild)"
   # The engine (this process) spawns the native Rust worker for rust:<op> ops.
   local rust_env=""; [[ -x "$RUST_WORKER_BIN" ]] && rust_env="AMBER_RUST_WORKER_BIN='$RUST_WORKER_BIN'"
   say "relaunching the engine under the debugger (JDWP :$port)..."
@@ -586,14 +920,14 @@ run_debug() {
   for i in $(seq 1 60); do port_open "$port" && break; sleep 1; done
   echo
   if port_open "$port"; then ok "engine running under the debugger - JDWP on localhost:$port"
-  else warn "engine not on :$port yet - watch it: texera_start attach (window cum-debug)"; fi
+  else warn "engine not on :$port yet - watch it: texera attach (window cum-debug)"; fi
   cat <<EOF
 
 Attach from nvim (current editor):
   :luafile $ROOT/profiling/nvim_tuple_debug.lua   (sets breakpoints + dap configs)
   :TexeraDebug                                      (attach + set breakpoints)
 Then set breakpoints (<leader>b) and Run a workflow (web UI, or profiling/tx_client.py).
-Stop the debug engine:  texera_start debug stop
+Stop the debug engine:  texera debug stop
 EOF
 }
 
@@ -641,6 +975,38 @@ expand_targets() {
 }
 
 # ---- entrypoint ------------------------------------------------------------
+# ---- dev-box dispatch ------------------------------------------------------
+# If this checkout's dev box is running and we're on the host (not already
+# inside it), run the SAME command inside the box against the mounted real code.
+# 'box' management and help always stay on the host; TEXERA_NO_BOX=1 forces host.
+if [[ -z "${TEXERA_DEV_CONTAINER:-}" && -z "${TEXERA_NO_BOX:-}" ]]; then
+  _box="$(box_name 2>/dev/null)"
+  case "${1:-}" in
+    box|multi|-h|--help|help) _box="" ;;   # host-level commands: never use the box
+  esac
+  if [[ -n "$_box" ]]; then
+    # For app-run targets, create the box on demand so `texera fresh` just
+    # works with no separate `box up`. Read-only/host commands (status, stop,
+    # free-ports, ...) only redirect into a box that's ALREADY running.
+    if ! running_container "$_box"; then
+      case "${1:-}" in
+        fresh|refresh|dev|app|app-be|backend|obs|observability|debug|docker|single|rust|k8s|kubernetes)
+          say "no dev box for this checkout yet; creating '$_box' first"; box_up ;;
+      esac
+    fi
+    if running_container "$_box"; then
+      # Re-assert the proxy route for app-run targets: a host `app` run rewrites
+      # it to host.docker.internal, and the box can't fix it (/opt/dotbin is ro).
+      case "${1:-}" in
+        fresh|refresh|dev|app|app-be|backend) write_proxy_route "$(multi_project)" "$_box" 4200 ;;
+      esac
+      say "running in dev box '$_box' (real code at $ROOT)"
+      _tty=(-i); [[ -t 0 ]] && _tty=(-it)
+      exec "$CE" exec "${_tty[@]}" -w "$ROOT" "$_box" texera "$@"
+    fi
+  fi
+fi
+
 cmd="${1:-}"
 case "$cmd" in
   ""|menu)
@@ -649,6 +1015,8 @@ case "$cmd" in
     echo "  ${c_grn}app-be${c_off} backend only (no frontend)   ${c_grn}rust${c_off} (re)build native Rust worker   ${c_grn}dev${c_off} = db+infra+app"
     echo "  ${c_grn}debug${c_off} = full pipeline, engine under JDWP on :5005 (then :TexeraDebug in nvim)"
     echo "  ${c_grn}docker${c_off} single-node    ${c_grn}k8s${c_off} helm"
+    echo "  ${c_grn}multi${c_off} = this checkout as an isolated instance behind a shared proxy (http://<folder>.localhost); 'multi fresh' wipes its DB, 'multi down' stops it"
+    echo "  ${c_grn}box${c_off} up = DinD dev container for this checkout; after that every 'texera <target>' runs IN it against your real code (box down|shell|status|chown)"
     echo "  ${c_grn}fresh${c_off} = wipe DB + clean rebuild + start dev (from-scratch install test)"
     echo "  ${c_grn}refresh${c_off} = rebuild + restart app, no data wipe (after code changes)"
     read -rp "start> " line
@@ -663,6 +1031,8 @@ case "$cmd" in
     mapfile -t T < <(expand_targets "$@" | tac)
     for t in "${T[@]}"; do stop_target "$t"; done
     ;;
+  box)     shift; run_box "$@" ;;     # DinD dev box: run all targets in-container against real code
+  multi)   shift; run_multi "${1:-up}" ;;   # this checkout as an isolated, proxied instance (many checkouts at once)
   debug)   shift; run_debug "$@" ;;   # full debug pipeline (engine under JDWP on :5005)
   fresh)   run_fresh ;;               # wipe DB + clean rebuild + start dev (from-scratch install test)
   refresh) shift; run_refresh "${1:-}" ;;   # non-destructive: rebuild + restart app, no data wipe

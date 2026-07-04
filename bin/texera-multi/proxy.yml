@@ -1,0 +1,42 @@
+# Shared Traefik reverse proxy for running multiple Texera checkouts at once.
+#
+# One proxy serves every checkout. It routes  http://<folder>.localhost  to that
+# checkout's box (or single-node nginx) by CONTAINER NAME: because Traefik and
+# every box share the `texera-proxy` network, Docker's built-in DNS resolves the
+# backend name (e.g. texera3-dev) with no host ports and no code/port changes.
+#
+# Routes come from the file provider (the ./dynamic dir), NOT the Docker socket:
+# Docker 29+ rejects the old API version Traefik's docker client negotiates, so
+# label-based discovery 404s everything. texera writes one small route
+# file per box into ./dynamic; Traefik hot-reloads them.
+#
+#   start:  docker compose -f proxy.yml up -d      (texera does this)
+#   dash:   http://localhost:8090   (Traefik dashboard: which routes are live)
+name: texera-proxy
+
+services:
+  traefik:
+    image: traefik:v3.5
+    container_name: texera-proxy
+    restart: unless-stopped
+    # Lets host-mode routes target http://host.docker.internal:4200 (a checkout's
+    # ng serve running on the host, not in a box). Boxes are still reached by name.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - --providers.file.directory=/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --api.dashboard=true
+      - --api.insecure=true
+    ports:
+      - "80:80"       # every http://<folder>.localhost lands here
+      - "8090:8080"   # Traefik's own dashboard (not a Texera port)
+    volumes:
+      - ./dynamic:/dynamic:ro
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    name: texera-proxy

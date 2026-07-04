@@ -5,8 +5,8 @@ return {
     "coder/claudecode.nvim",
     config = function()
       require("claudecode").setup({
-        -- start every session in `auto` permission mode (all entry points)
-        terminal_cmd = "claude --permission-mode auto",
+        -- start every session in `auto` permission mode with Fable 5 as the default model
+        terminal_cmd = "claude --permission-mode auto --model claude-fable-5",
         terminal = {
           provider = "native",
           split_width_percentage = 0.30,

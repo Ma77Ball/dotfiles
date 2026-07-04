@@ -1,0 +1,97 @@
+# Overlay applied on top of a checkout's bin/single-node/docker-compose.yml to
+# turn it into one isolated, proxied instance. texera exports TX_PROJECT
+# (the folder name, e.g. texera3) and TX_HOST (texera3.localhost) before calling
+#   docker compose -p $TX_PROJECT -f <checkout>/bin/single-node/docker-compose.yml \
+#                                 -f instance.override.yml up -d
+#
+# What this overlay does, and why:
+#   * container_name is hardcoded in the base compose (texera-minio, ...), and
+#     names are daemon-global, so two checkouts would collide. We prefix every
+#     one with $TX_PROJECT to make them unique.
+#   * The base .env references four services by their ORIGINAL container names
+#     (texera-postgres, texera-minio, texera-lakefs, texera-lakekeeper) as
+#     hostnames. After renaming, we re-add those originals as network aliases so
+#     internal DNS still resolves. (Every other cross-service URL in .env uses
+#     the compose SERVICE name, which compose aliases automatically.)
+#   * nginx: drop the published :8080 (all instances would fight over it) and
+#     instead join the shared texera-proxy network with Traefik labels, so it is
+#     reachable only through the proxy at http://$TX_HOST.
+#   * The default network name is hardcoded to `texera-single-node` in the base;
+#     we scope it per project so instances get isolated networks.
+#
+# Volumes need no override: with `-p $TX_PROJECT` compose prefixes the unnamed
+# volumes (postgres_data, minio_data, workflow_result_data) with the project
+# name, so each checkout gets its own data.
+
+services:
+  postgres:
+    container_name: ${TX_PROJECT}-postgres
+    networks:
+      default:
+        aliases: [texera-postgres]
+  minio:
+    container_name: ${TX_PROJECT}-minio
+    networks:
+      default:
+        aliases: [texera-minio]
+  minio-init:
+    container_name: ${TX_PROJECT}-minio-init
+  lakefs:
+    container_name: ${TX_PROJECT}-lakefs
+    networks:
+      default:
+        aliases: [texera-lakefs]
+  lakekeeper-migrate:
+    container_name: ${TX_PROJECT}-lakekeeper-migrate
+  lakekeeper:
+    container_name: ${TX_PROJECT}-lakekeeper
+    networks:
+      default:
+        aliases: [texera-lakekeeper]
+  lakekeeper-init:
+    container_name: ${TX_PROJECT}-lakekeeper-init
+  file-service:
+    container_name: ${TX_PROJECT}-file-service
+  config-service:
+    container_name: ${TX_PROJECT}-config-service
+  access-control-service:
+    container_name: ${TX_PROJECT}-access-control-service
+  workflow-computing-unit-managing-service:
+    container_name: ${TX_PROJECT}-wcums
+  workflow-compiling-service:
+    container_name: ${TX_PROJECT}-workflow-compiling-service
+  workflow-runtime-coordinator-service:
+    container_name: ${TX_PROJECT}-wrcs
+  dashboard-service:
+    container_name: ${TX_PROJECT}-dashboard-service
+  litellm:
+    container_name: ${TX_PROJECT}-litellm
+  agent-service:
+    container_name: ${TX_PROJECT}-agent-service
+  startup-message:
+    container_name: ${TX_PROJECT}-startup-message
+  example-data-loader:
+    container_name: ${TX_PROJECT}-example-data-loader
+
+  nginx:
+    container_name: ${TX_PROJECT}-nginx
+    # Compose merges list values by appending, so we cannot just "remove" the
+    # base's "8080:8080"; !override replaces the whole key (needs Compose v2.24+,
+    # you have v5). Empty = publish nothing; the proxy is the only way in.
+    ports: !override []
+    networks:
+      default: {}
+      proxy: {}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=texera-proxy"
+      - "traefik.http.routers.${TX_PROJECT}.rule=Host(`${TX_HOST}`)"
+      - "traefik.http.routers.${TX_PROJECT}.entrypoints=web"
+      - "traefik.http.services.${TX_PROJECT}.loadbalancer.server.port=8080"
+
+networks:
+  default:
+    name: ${TX_PROJECT}-net
+  proxy:
+    external: true
+    name: texera-proxy
