@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# spark - Apache Spark dev launcher. Build + run a Spark source checkout, with
+# builds/runs pinned to a FULL JDK 17 (needs javac; the system java-21/25-openjdk
+# are JRE-only and the default java is 25, both of which break the Scala build
+# with "object java.lang.Object in compiler mirror not found").
+#
+# Launch targets:
+#   shell     bin/spark-shell (Scala REPL; `spark` + `sc` pre-bound). Default target.
+#   sql       bin/spark-sql   (SQL CLI; builds with -Phive)
+#   pyspark   bin/pyspark     (Python REPL; builds with -Phive, uses .venv)
+#   submit    bin/spark-submit <args...>   (passthrough)
+#   example   bin/run-example <Class> [args...]  e.g. `spark example SparkPi 100`
+#
+# Build/run flows (mirror the texera command):
+#   fresh   [target]   from-scratch: `sbt clean package`, then launch (default shell)
+#   refresh [target]   incremental:  `sbt package`, then launch (default shell)
+#   rebuild [clean]    build only, no launch (incremental unless 'clean')
+#
+# Housekeeping:
+#   status             JDK, whether the assembly is built, and what's running
+#   stop               kill running spark-shell/spark-submit JVMs, free the UI port
+#   free-ports         free the Spark UI ports (4040-4049)
+#   spark              interactive: pick a target
+#
+# Env overrides: SPARK_JAVA_HOME (JDK 17 to use), SPARK_PROFILES (extra sbt -P
+# profiles, e.g. "-Phive -Pkubernetes"), SPARK_VENV (python venv dir, default .venv).
+
+set -uo pipefail
+
+c_grn=$'\033[32m'; c_red=$'\033[31m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_cyn=$'\033[36m'; c_off=$'\033[0m'
+say()  { echo "${c_cyn}==>${c_off} $*"; }
+ok()   { echo "  ${c_grn}v${c_off} $*"; }
+warn() { echo "  ${c_yel}!${c_off} $*"; }
+die()  { echo "${c_red}error:${c_off} $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "$1 is required but was not found on PATH"; }
+
+# Find the Spark checkout: walk up from $PWD for a dir with pom.xml + core/ +
+# bin/spark-shell (the launcher scripts live in bin/).
+_find_root() {
+  local d="$PWD"
+  while [[ "$d" != / ]]; do
+    [[ -f "$d/pom.xml" && -d "$d/core" && -x "$d/bin/spark-shell" ]] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+ROOT="$(_find_root)" || die "spark: not inside a Spark checkout (no pom.xml + core/ + bin/spark-shell above $PWD). cd into your spark clone first."
+
+# Scala binary version (for the assembly jars path), read from pom; default 2.13.
+SCALA_BIN="$(grep -m1 '<scala.binary.version>' "$ROOT/pom.xml" 2>/dev/null | sed -E 's/.*>([0-9.]+)<.*/\1/')"
+[[ -n "$SCALA_BIN" ]] || SCALA_BIN=2.13
+JARS_DIR="$ROOT/assembly/target/scala-$SCALA_BIN/jars"
+SBT="$ROOT/build/sbt"
+VENV="${SPARK_VENV:-$ROOT/.venv}"
+
+# ---- JDK 17 selection (must be a FULL JDK: needs javac + ct.sym) ------------
+# The Scala build compiles with `--release 17`, which makes scalac read platform
+# symbols from $JAVA_HOME/lib/ct.sym. A JRE-only "JDK" (no javac, no ct.sym) fails
+# at compiler init with MissingRequirementError. So insist on a real compiler.
+JDK17=""
+_is_full_jdk17() {  # $1 = java home
+  local j="$1"
+  [[ -x "$j/bin/javac" && -f "$j/lib/ct.sym" ]] || return 1
+  "$j/bin/javac" -version 2>&1 | grep -q ' 17\.' || return 1
+  return 0
+}
+find_jdk17() {
+  local c
+  if [[ -n "${SPARK_JAVA_HOME:-}" ]] && _is_full_jdk17 "$SPARK_JAVA_HOME"; then JDK17="$SPARK_JAVA_HOME"; return; fi
+  # sdkman 17.x candidates (this machine's only real JDK 17 is here)
+  for c in "$HOME/.sdkman/candidates/java"/17*; do
+    _is_full_jdk17 "$c" && { JDK17="$c"; return; }
+  done
+  # any /usr/lib/jvm/*17* that is a full JDK (not the JRE-only openjdk packages)
+  for c in /usr/lib/jvm/*17*; do
+    _is_full_jdk17 "$c" && { JDK17="$c"; return; }
+  done
+  # the current $JAVA_HOME, if it happens to be a full JDK 17
+  [[ -n "${JAVA_HOME:-}" ]] && _is_full_jdk17 "$JAVA_HOME" && JDK17="$JAVA_HOME"
+}
+require_jdk17() {
+  find_jdk17
+  if [[ -z "$JDK17" ]]; then
+    die "no FULL JDK 17 found (needs javac + ct.sym). The system java-21/25-openjdk are JRE-only and default java is 25; both fail the Scala build. Install one, e.g. 'sdk install java 17.0.19-tem', or set SPARK_JAVA_HOME."
+  fi
+  ok "using JDK 17: $JDK17"
+}
+# run a command under JDK 17
+with_jdk17() { JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" "$@"; }
+
+# ---- ports (Spark web UI probes 4040, then 4041.. if taken) ----------------
+UI_PORTS=(4040 4041 4042 4043 4044 4045 4046 4047 4048 4049)
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0 || return 1; }
+pids_on_port() {
+  local p="$1"
+  if command -v lsof >/dev/null 2>&1; then lsof -t -iTCP:"$p" -sTCP:LISTEN 2>/dev/null
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnpH 2>/dev/null | grep -oE "[:*]$p [^,]*pid=[0-9]+" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+  fi
+}
+free_port() {
+  local p="$1" pid procs="" found=0 i
+  for pid in $(pids_on_port "$p"); do found=1; procs+="$pid($(ps -p "$pid" -o comm= 2>/dev/null)) "; kill "$pid" 2>/dev/null; done
+  [[ $found -eq 0 ]] && return 1
+  for i in $(seq 1 10); do port_open "$p" || { ok "freed :$p - was $procs"; return 0; }; sleep 0.3; done
+  for pid in $(pids_on_port "$p"); do kill -9 "$pid" 2>/dev/null; done
+  ok "force-freed :$p - was $procs"
+}
+free_ports() {
+  command -v lsof >/dev/null 2>&1 || command -v ss >/dev/null 2>&1 || { warn "neither lsof nor ss found - cannot free ports"; return; }
+  say "clearing Spark UI ports"
+  local p any=0
+  for p in "${UI_PORTS[@]}"; do port_open "$p" && { free_port "$p"; any=1; }; done
+  [[ $any -eq 0 ]] && ok "all Spark UI ports already free (${UI_PORTS[0]}-${UI_PORTS[-1]})"
+}
+
+# ---- build -----------------------------------------------------------------
+hive_built() { compgen -G "$JARS_DIR/spark-hive_${SCALA_BIN}-*.jar" >/dev/null 2>&1; }
+assembly_built() { [[ -d "$JARS_DIR" ]] && [[ -n "$(ls -A "$JARS_DIR" 2>/dev/null)" ]]; }
+
+# profiles for a launch target: sql/pyspark need Hive, others don't.
+profiles_for() {
+  case "$1" in
+    sql|pyspark) echo "-Phive ${SPARK_PROFILES:-}" ;;
+    *)           echo "${SPARK_PROFILES:-}" ;;
+  esac
+}
+
+# rebuild [clean] [profiles...]
+rebuild() {
+  require_jdk17
+  local clean="" profiles=()
+  [[ "${1:-}" == clean ]] && { clean=clean; shift; }
+  profiles=($@)
+  local -a cmds=("${profiles[@]}")
+  [[ -n "$clean" ]] && cmds+=(clean)
+  cmds+=(package)
+  say "sbt ${cmds[*]} (JDK 17) - first build is slow (~20-40 min), incremental is fast"
+  with_jdk17 "$SBT" "${cmds[@]}" || die "sbt build failed"
+  assembly_built || die "build finished but no jars in $JARS_DIR"
+  ok "build complete ($(ls "$JARS_DIR" | wc -l) jars in assembly/target/scala-$SCALA_BIN/jars)"
+}
+
+# ensure the assembly exists (and Hive if this target needs it); build if not.
+ensure_built() {  # $1 = launch target
+  local target="$1" profiles; profiles="$(profiles_for "$target")"
+  local needs_hive=no; [[ "$profiles" == *-Phive* ]] && needs_hive=yes
+  if assembly_built && { [[ "$needs_hive" == no ]] || hive_built; }; then
+    ok "assembly present ($(ls "$JARS_DIR" | wc -l) jars)$(hive_built && echo ', hive')"
+    return 0
+  fi
+  if ! assembly_built; then warn "no assembly jars yet - building"
+  else warn "assembly present but Hive not built ($target needs it) - rebuilding with -Phive"; fi
+  rebuild $profiles
+}
+
+# ---- venv (for pyspark) ----------------------------------------------------
+ensure_venv() {
+  if [[ -x "$VENV/bin/python" ]]; then ok "python venv ready ($VENV)"; return 0; fi
+  need python3
+  say "creating python venv at $VENV and installing dev/requirements.txt (first time is slow)"
+  python3 -m venv "$VENV" || die "venv create failed"
+  "$VENV/bin/pip" install -q --upgrade pip >/dev/null 2>&1
+  if [[ -f "$ROOT/dev/requirements.txt" ]]; then
+    "$VENV/bin/pip" install -q -r "$ROOT/dev/requirements.txt" || warn "some pyspark deps failed to install; pyspark may be limited"
+  else
+    warn "no dev/requirements.txt; installing pandas/pyarrow/numpy for pyspark"
+    "$VENV/bin/pip" install -q pandas pyarrow numpy py4j >/dev/null 2>&1 || true
+  fi
+  ok "python venv ready ($VENV)"
+}
+
+# ---- launch ----------------------------------------------------------------
+# exec an interactive Spark entrypoint under JDK 17. Interactive, foreground.
+launch() {  # $1 = target ; rest = passthrough args
+  local target="$1"; shift
+  require_jdk17
+  case "$target" in
+    shell)   say "launching spark-shell (Scala REPL)";   exec env JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" "$ROOT/bin/spark-shell" "$@" ;;
+    sql)     say "launching spark-sql (SQL CLI)";         exec env JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" "$ROOT/bin/spark-sql" "$@" ;;
+    submit)  [[ $# -gt 0 ]] || die "usage: spark submit <app.jar|--class ...> [args]"
+             say "spark-submit $*";                       exec env JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" "$ROOT/bin/spark-submit" "$@" ;;
+    example) [[ $# -gt 0 ]] || die "usage: spark example <ExampleClass> [args]  (e.g. spark example SparkPi 100)"
+             say "run-example $*";                        exec env JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" "$ROOT/bin/run-example" "$@" ;;
+    pyspark) ensure_venv
+             say "launching pyspark (Python REPL, venv $VENV)"
+             exec env JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH" \
+                  PYSPARK_PYTHON="$VENV/bin/python" PYSPARK_DRIVER_PYTHON="$VENV/bin/python" \
+                  "$ROOT/bin/pyspark" "$@" ;;
+    *) die "unknown launch target: $target (shell|sql|pyspark|submit|example)" ;;
+  esac
+}
+
+# build (per flow), then launch. $1 = flow (fresh|refresh), rest = target + args
+run_flow() {
+  local flow="$1"; shift
+  local target="${1:-shell}"; [[ $# -gt 0 ]] && shift
+  case "$target" in shell|sql|pyspark|submit|example) : ;; *) die "unknown target '$target' for $flow (shell|sql|pyspark|submit|example)" ;; esac
+  local profiles; profiles="$(profiles_for "$target")"
+  if [[ "$flow" == fresh ]]; then
+    say "fresh: clean rebuild, then launch $target"
+    rebuild clean $profiles
+  else
+    say "refresh: incremental rebuild, then launch $target"
+    rebuild $profiles
+  fi
+  launch "$target" "$@"
+}
+
+# ---- status / stop ---------------------------------------------------------
+# running Spark driver JVMs (spark-shell/spark-submit/pyspark all boot SparkSubmit)
+spark_pids() { pgrep -f 'org.apache.spark.deploy.SparkSubmit' 2>/dev/null; }
+status() {
+  say "spark status"
+  # The FIRST <version> in pom.xml is the Apache parent pom; Spark's own version
+  # is the <version> under the spark-parent <artifactId>.
+  local sv; sv="$(awk '/<artifactId>spark-parent_/{f=1} f&&/<version>/{gsub(/.*<version>|<\/version>.*/,""); gsub(/[[:space:]]/,""); print; exit}' "$ROOT/pom.xml")"
+  echo "  checkout : $ROOT (Spark ${sv:-?}, scala $SCALA_BIN)"
+  find_jdk17
+  if [[ -n "$JDK17" ]]; then ok "JDK 17: $JDK17"; else warn "no full JDK 17 found (builds will fail)"; fi
+  if assembly_built; then
+    ok "assembly built ($(ls "$JARS_DIR" | wc -l) jars$(hive_built && echo ', hive'))"
+  else
+    warn "assembly NOT built - run 'spark fresh' or 'spark rebuild'"
+  fi
+  local p up=""
+  for p in "${UI_PORTS[@]}"; do port_open "$p" && up+="$p "; done
+  [[ -n "$up" ]] && ok "Spark web UI on: ${up}(http://localhost:${up%% *})" || echo "  ${c_dim}no Spark UI port open (4040-4049)${c_off}"
+  local pids; pids="$(spark_pids)"
+  if [[ -n "$pids" ]]; then
+    ok "running Spark JVMs:"; ps -o pid=,etime=,args= -p $pids 2>/dev/null | sed 's/^/    /' | cut -c1-160
+  else
+    echo "  ${c_dim}no running Spark JVMs${c_off}"
+  fi
+}
+stop() {
+  say "stopping Spark"
+  local pids; pids="$(spark_pids)"
+  if [[ -n "$pids" ]]; then
+    kill $pids 2>/dev/null; ok "sent SIGTERM to Spark JVM(s): $pids"
+    local i; for i in $(seq 1 10); do pids="$(spark_pids)"; [[ -z "$pids" ]] && break; sleep 0.3; done
+    pids="$(spark_pids)"; [[ -n "$pids" ]] && { kill -9 $pids 2>/dev/null; ok "force-killed: $pids"; }
+  else
+    ok "no running Spark JVMs"
+  fi
+  free_ports
+}
+
+# ---- entrypoint ------------------------------------------------------------
+cmd="${1:-}"
+case "$cmd" in
+  ""|menu)
+    echo "${c_cyn}spark launcher${c_off} - pick a target:"
+    echo "  ${c_grn}shell${c_off} scala REPL   ${c_grn}sql${c_off} SQL CLI   ${c_grn}pyspark${c_off} python REPL"
+    echo "  ${c_grn}fresh${c_off} = clean rebuild + launch    ${c_grn}refresh${c_off} = incremental rebuild + launch"
+    echo "  ${c_grn}rebuild${c_off} [clean] = build only   ${c_grn}status${c_off}   ${c_grn}stop${c_off}"
+    echo "  (append a target to fresh/refresh, e.g. 'refresh pyspark'; default is shell)"
+    read -rp "spark> " line
+    [[ -n "${line:-}" ]] || die "nothing selected"
+    read -ra A <<< "$line"
+    exec "$0" "${A[@]}" ;;
+  fresh)     shift; run_flow fresh "$@" ;;
+  refresh)   shift; run_flow refresh "$@" ;;
+  rebuild|build)
+             shift
+             if [[ "${1:-}" == clean ]]; then rebuild clean ${SPARK_PROFILES:-}; else rebuild ${SPARK_PROFILES:-}; fi ;;
+  shell|sql|pyspark|submit|example)
+             shift; ensure_built "$cmd"; launch "$cmd" "$@" ;;
+  status)    status ;;
+  stop|down) stop ;;
+  free-ports|free|clear-ports|clear) free_ports ;;
+  -h|--help|help) sed -n '2,32p' "$0" ;;
+  *) die "unknown command: $cmd (try: spark --help, or spark shell|sql|pyspark|fresh|refresh|rebuild|status|stop)" ;;
+esac
