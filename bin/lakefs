@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# lakefs - lakeFS dev launcher. Runs a lakeFS source checkout locally so you can
+# see UI/backend changes and experiment. Two moving parts:
+#
+#   backend  the Go server (cmd/lakefs) in --quickstart mode on :8000. Local KV +
+#            local blockstore, auto-created admin creds, no docker/postgres needed.
+#   ui       the Vite dev server on :3000 with hot-reload. It proxies /api and /
+#            to the backend, so editing webui/src updates the browser instantly.
+#
+# The Go build is pinned to GOTOOLCHAIN=auto because go.mod needs a newer Go than
+# the system one; the required toolchain is fetched once and cached.
+#
+# Main flows:
+#   up               build if needed, start backend (bg) + ui (fg). THE one to use.
+#   backend|server   run only the Go server (foreground, :8000)
+#   ui|dev|web       run only the Vite dev server (foreground, :3000)
+#   build [clean]    build the Go binary + install webui deps (no launch)
+#
+# Housekeeping:
+#   status           toolchain, build state, ports, running pids, creds, data dir
+#   logs             tail the backend log
+#   stop|down        kill backend + ui, free ports
+#   free-ports       free :8000 and :3000
+#   reset            stop, then wipe the local dev data dir (fresh install)
+#   open             open the UI in a browser
+#   lakefs           interactive: pick a command
+#
+# Login (quickstart): open http://localhost:3000 and sign in with
+#   Access Key ID    : AKIAIOSFOLQUICKSTART
+#   Secret Access Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+#
+# Env overrides: LAKEFS_DEV_DATA (data dir, default ~/.local/state/lakefs-dev),
+#   LAKEFS_BACKEND_PORT (8000), LAKEFS_UI_PORT (3000), LAKEFS_GOTOOLCHAIN (auto).
+
+set -uo pipefail
+
+c_grn=$'\033[32m'; c_red=$'\033[31m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_cyn=$'\033[36m'; c_off=$'\033[0m'
+say()  { echo "${c_cyn}==>${c_off} $*"; }
+ok()   { echo "  ${c_grn}v${c_off} $*"; }
+warn() { echo "  ${c_yel}!${c_off} $*"; }
+die()  { echo "${c_red}error:${c_off} $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "$1 is required but was not found on PATH"; }
+
+# ---- locate the lakeFS checkout -------------------------------------------
+# Walk up from $PWD for a dir that has go.mod (module github.com/treeverse/lakefs),
+# a webui/ dir, and cmd/lakefs.
+_find_root() {
+  local d="$PWD"
+  while [[ "$d" != / ]]; do
+    if [[ -f "$d/go.mod" && -d "$d/webui" && -d "$d/cmd/lakefs" ]] \
+       && grep -q '^module github.com/treeverse/lakefs' "$d/go.mod" 2>/dev/null; then
+      printf '%s' "$d"; return 0
+    fi
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+ROOT="$(_find_root)" || die "lakefs: not inside a lakeFS checkout (need go.mod + webui/ + cmd/lakefs above $PWD). cd into your lakeFS clone first."
+
+# ---- config ----------------------------------------------------------------
+BACKEND_PORT="${LAKEFS_BACKEND_PORT:-8000}"
+UI_PORT="${LAKEFS_UI_PORT:-3000}"
+DATA_DIR="${LAKEFS_DEV_DATA:-$HOME/.local/state/lakefs-dev}"
+BIN="$DATA_DIR/bin/lakefs"
+LOG="$DATA_DIR/backend.log"
+PIDFILE="$DATA_DIR/backend.pid"
+UI_DIR="$ROOT/webui"
+GOTC="${LAKEFS_GOTOOLCHAIN:-auto}"   # go.mod needs a newer Go than the system one
+QS_KEY="AKIAIOSFOLQUICKSTART"
+QS_SECRET="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+go_env=(GOTOOLCHAIN="$GOTC")   # prefix for every go invocation
+
+# ---- ports -----------------------------------------------------------------
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0 || return 1; }
+pids_on_port() {
+  local p="$1"
+  if command -v lsof >/dev/null 2>&1; then lsof -t -iTCP:"$p" -sTCP:LISTEN 2>/dev/null
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnpH 2>/dev/null | grep -oE "[:*]$p [^,]*pid=[0-9]+" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+  fi
+}
+free_port() {
+  local p="$1" pid procs="" found=0 i
+  for pid in $(pids_on_port "$p"); do found=1; procs+="$pid($(ps -p "$pid" -o comm= 2>/dev/null)) "; kill "$pid" 2>/dev/null; done
+  [[ $found -eq 0 ]] && return 1
+  for i in $(seq 1 10); do port_open "$p" || { ok "freed :$p - was $procs"; return 0; }; sleep 0.3; done
+  for pid in $(pids_on_port "$p"); do kill -9 "$pid" 2>/dev/null; done
+  ok "force-freed :$p - was $procs"
+}
+free_ports() {
+  command -v lsof >/dev/null 2>&1 || command -v ss >/dev/null 2>&1 || { warn "neither lsof nor ss found - cannot free ports"; return; }
+  say "clearing lakeFS dev ports ($BACKEND_PORT, $UI_PORT)"
+  local any=0 p
+  for p in "$BACKEND_PORT" "$UI_PORT"; do port_open "$p" && { free_port "$p"; any=1; }; done
+  [[ $any -eq 0 ]] && ok "both ports already free"
+}
+
+# ---- build -----------------------------------------------------------------
+binary_built() { [[ -x "$BIN" ]]; }
+deps_installed() { [[ -d "$UI_DIR/node_modules" ]]; }
+
+build_backend() {  # $1 = "clean" to force rebuild
+  need go
+  mkdir -p "$(dirname "$BIN")"
+  [[ "${1:-}" == clean ]] && rm -f "$BIN"
+  say "building lakeFS server (go build, GOTOOLCHAIN=$GOTC) - first build fetches the toolchain and is slow"
+  ( cd "$ROOT" && env "${go_env[@]}" go build -o "$BIN" ./cmd/lakefs ) || die "go build failed"
+  binary_built || die "build reported success but $BIN is missing"
+  ok "backend built: $BIN"
+}
+install_ui_deps() {
+  need npm
+  if deps_installed; then ok "webui deps present ($UI_DIR/node_modules)"; return 0; fi
+  say "installing webui deps (npm install in webui/ - first time is slow)"
+  ( cd "$UI_DIR" && npm install ) || die "npm install failed"
+  ok "webui deps installed"
+}
+ensure_backend_built() { binary_built && { ok "backend binary present ($BIN)"; return 0; }; warn "backend not built yet"; build_backend; }
+
+# ---- backend process -------------------------------------------------------
+backend_pid() {
+  if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then cat "$PIDFILE"; return 0; fi
+  pids_on_port "$BACKEND_PORT" | head -1
+}
+backend_up() { port_open "$BACKEND_PORT"; }
+
+# Is OUR tracked backend (from the pidfile) the one that's alive?
+our_backend_alive() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
+
+# Describe whatever foreign thing holds :$1 (a docker container if the port is
+# published by one, else the listening process name(s)).
+port_holder_desc() {
+  local p="$1" c pid names=""
+  if command -v docker >/dev/null 2>&1; then
+    c="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -E "(:|>)$p->" | awk '{print $1}' | head -1)"
+    [[ -n "$c" ]] && { printf 'docker container "%s"' "$c"; return; }
+  fi
+  for pid in $(pids_on_port "$p"); do names+="$(ps -p "$pid" -o comm= 2>/dev/null)($pid) "; done
+  printf '%s' "${names:-an unknown process}"
+}
+
+# Refuse to proceed if a process that isn't ours is sitting on :$BACKEND_PORT:
+# Vite proxies to :8000, so a foreign server there would silently shadow the
+# source build we are trying to test.
+require_port_free_or_ours() {
+  backend_up || return 0
+  our_backend_alive && return 0
+  die "port $BACKEND_PORT is held by $(port_holder_desc "$BACKEND_PORT"), not this dev server.
+    The Vite dev server proxies to :$BACKEND_PORT, so the UI would talk to THAT server, not your source build.
+    Free it first (e.g. stop your Texera stack: docker stop texera-lakefs-lakefs), then re-run 'lakefs up'."
+}
+
+# env for the server: quickstart + pin all local paths under DATA_DIR so state is
+# contained and 'reset' can wipe it.
+backend_run_env() {
+  env \
+    LAKEFS_DATABASE_TYPE=local \
+    LAKEFS_DATABASE_LOCAL_PATH="$DATA_DIR/metadata" \
+    LAKEFS_BLOCKSTORE_TYPE=local \
+    LAKEFS_BLOCKSTORE_LOCAL_PATH="$DATA_DIR/block" \
+    LAKEFS_COMMITTED_LOCAL_CACHE_DIR="$DATA_DIR/cache" \
+    "$@"
+}
+
+run_backend_fg() {
+  ensure_backend_built
+  require_port_free_or_ours
+  mkdir -p "$DATA_DIR"/{metadata,block,cache}
+  say "starting lakeFS backend (quickstart) on :$BACKEND_PORT  (data: $DATA_DIR)"
+  ok "login creds -> $QS_KEY / $QS_SECRET"
+  exec_backend() { backend_run_env "$BIN" run --quickstart; }
+  exec_backend
+}
+
+start_backend_bg() {
+  if our_backend_alive && backend_up; then ok "backend already up on :$BACKEND_PORT (ours)"; return 0; fi
+  require_port_free_or_ours
+  ensure_backend_built
+  mkdir -p "$DATA_DIR"/{metadata,block,cache}
+  say "starting lakeFS backend (quickstart, background) on :$BACKEND_PORT"
+  backend_run_env nohup "$BIN" run --quickstart >"$LOG" 2>&1 &
+  echo $! >"$PIDFILE"
+  local i
+  for i in $(seq 1 60); do
+    port_open "$BACKEND_PORT" && { ok "backend ready on :$BACKEND_PORT  (log: $LOG)"; return 0; }
+    kill -0 "$(cat "$PIDFILE")" 2>/dev/null || { warn "backend exited early - last log lines:"; tail -n 25 "$LOG" | sed 's/^/    /'; die "backend failed to start"; }
+    sleep 0.5
+  done
+  warn "backend did not open :$BACKEND_PORT within 30s - last log lines:"; tail -n 25 "$LOG" | sed 's/^/    /'
+  die "backend start timed out"
+}
+
+# ---- ui --------------------------------------------------------------------
+run_ui_fg() {
+  install_ui_deps
+  say "starting Vite dev server on :$UI_PORT  ->  http://localhost:$UI_PORT"
+  if backend_up; then
+    our_backend_alive || warn "note: :$BACKEND_PORT is served by $(port_holder_desc "$BACKEND_PORT"), not this launcher - the UI will proxy to it"
+  else
+    warn "backend not detected on :$BACKEND_PORT - API calls will fail until you run 'lakefs backend' (or 'lakefs up')"
+  fi
+  ( cd "$UI_DIR" && exec npm run dev ) # vite config pins port 3000
+}
+
+# ---- commands --------------------------------------------------------------
+cmd_up() {
+  ensure_backend_built
+  install_ui_deps
+  start_backend_bg
+  echo
+  say "open ${c_grn}http://localhost:$UI_PORT${c_off} and log in with $QS_KEY / $QS_SECRET"
+  say "backend runs in the background; Ctrl-C stops the UI only. 'lakefs stop' kills the backend."
+  echo
+  run_ui_fg
+}
+
+status() {
+  say "lakeFS dev status"
+  echo "  checkout : $ROOT"
+  echo "  data dir : $DATA_DIR"
+  local gv; gv="$(env "${go_env[@]}" go env GOVERSION 2>/dev/null)"
+  command -v go >/dev/null && ok "go: $(go version | awk '{print $3}') (build toolchain: GOTOOLCHAIN=$GOTC${gv:+, resolves to $gv})" || warn "go not on PATH"
+  binary_built && ok "backend binary built ($BIN)" || warn "backend NOT built - run 'lakefs build' or 'lakefs up'"
+  deps_installed && ok "webui deps installed" || warn "webui deps NOT installed - run 'lakefs build' or 'lakefs ui'"
+  if our_backend_alive && backend_up; then ok "backend UP on :$BACKEND_PORT (ours, pid $(cat "$PIDFILE"))  http://localhost:$BACKEND_PORT"
+  elif backend_up; then warn ":$BACKEND_PORT held by $(port_holder_desc "$BACKEND_PORT") (foreign - Vite would proxy to it; 'lakefs up' will refuse until it's freed)"
+  else echo "  ${c_dim}backend down (:$BACKEND_PORT free)${c_off}"; fi
+  if port_open "$UI_PORT"; then ok "UI dev server UP on :$UI_PORT  http://localhost:$UI_PORT"; else echo "  ${c_dim}UI dev server down (:$UI_PORT free)${c_off}"; fi
+  echo "  ${c_dim}creds: $QS_KEY / $QS_SECRET${c_off}"
+}
+
+logs() { [[ -f "$LOG" ]] || die "no backend log at $LOG (start it with 'lakefs up' or 'lakefs backend')"; say "tailing $LOG (Ctrl-C to stop)"; tail -n 50 -f "$LOG"; }
+
+stop() {
+  say "stopping lakeFS dev"
+  local pid; pid="$(backend_pid)"
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null; ok "sent SIGTERM to backend (pid $pid)"
+    local i; for i in $(seq 1 10); do backend_up || break; sleep 0.3; done
+    backend_up && { for pid in $(pids_on_port "$BACKEND_PORT"); do kill -9 "$pid" 2>/dev/null; done; ok "force-killed backend"; }
+  else ok "no tracked backend process"; fi
+  rm -f "$PIDFILE"
+  free_ports
+}
+
+reset() {
+  stop
+  say "about to delete the local dev data dir: $DATA_DIR"
+  read -rp "  wipe it? [y/N] " a
+  [[ "${a:-}" =~ ^[Yy]$ ]] || { warn "reset aborted"; return; }
+  rm -rf "$DATA_DIR"; ok "wiped $DATA_DIR - next 'lakefs up' starts a fresh install"
+}
+
+open_ui() {
+  local url="http://localhost:$UI_PORT"
+  command -v xdg-open >/dev/null && { xdg-open "$url" >/dev/null 2>&1 & ok "opened $url"; } || say "open $url"
+}
+
+# ---- entrypoint ------------------------------------------------------------
+cmd="${1:-}"
+case "$cmd" in
+  ""|menu)
+    echo "${c_cyn}lakeFS dev launcher${c_off} - pick a command:"
+    echo "  ${c_grn}up${c_off} backend + hot-reload UI (main)   ${c_grn}backend${c_off} server only   ${c_grn}ui${c_off} dev server only"
+    echo "  ${c_grn}build${c_off} [clean]   ${c_grn}status${c_off}   ${c_grn}logs${c_off}   ${c_grn}stop${c_off}   ${c_grn}reset${c_off}   ${c_grn}open${c_off}"
+    read -rp "lakefs> " line
+    [[ -n "${line:-}" ]] || die "nothing selected"
+    read -ra A <<< "$line"
+    exec "$0" "${A[@]}" ;;
+  up|start)             cmd_up ;;
+  backend|server|be)    run_backend_fg ;;
+  ui|dev|web|fe)        run_ui_fg ;;
+  build)                shift; build_backend "${1:-}"; install_ui_deps ;;
+  status|st)            status ;;
+  logs|log)             logs ;;
+  stop|down)            stop ;;
+  free-ports|free)      free_ports ;;
+  reset|clean)          reset ;;
+  open)                 open_ui ;;
+  -h|--help|help)       sed -n '2,40p' "$0" ;;
+  run)                  die "'lakefs run' is the real server flag; this launcher uses 'lakefs backend' (or 'lakefs up'). See 'lakefs --help'." ;;
+  *) die "unknown command: $cmd (try: lakefs --help, or lakefs up|backend|ui|build|status|stop)" ;;
+esac
