@@ -31,6 +31,11 @@
 #             volume (re-inits from sql/), clean-rebuild the dist, then start dev
 #   refresh   non-destructive: rebuild the backend and restart the app on the new
 #             build, WITHOUT wiping any data (use after backend code changes)
+#   prune     reclaim docker disk on the host AND inside every running box's inner
+#             dockerd: dangling images, build cache, stopped containers. 'prune
+#             all' also removes unused tagged images (re-pull/rebuild next start).
+#             Volumes are NEVER touched, so DB/MinIO/lakeFS data is safe. Also
+#             available as 'texera stop --prune' / '--prune-all'.
 #
 # Usage:
 #   texera <target...>        start targets, e.g. `texera obs` or `texera db infra app`
@@ -65,8 +70,13 @@ _find_root() {
 ROOT="$(_find_root)" || die "texera: not inside a Texera checkout (no build.sbt above $PWD). cd into texera / texera2 / texera3 first."
 
 # This script's own dir, so `multi` can find bin/texera-multi/ (proxy + overlay)
-# regardless of the caller's cwd.
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# regardless of the caller's cwd. Resolve the symlink chain first: texera is on
+# PATH as ~/.local/bin/texera -> ~/dotfiles/bin/texera, so an unresolved
+# BASH_SOURCE would point SELF_DIR at ~/.local/bin and land the Traefik route
+# files in a stray texera-multi/dynamic/ that nothing reads (new instances then
+# 404 through the proxy while their box serves fine).
+_self="${BASH_SOURCE[0]}"; _self="$(readlink -f "$_self" 2>/dev/null || echo "$_self")"
+SELF_DIR="$(cd "$(dirname "$_self")" && pwd)"
 MULTI_DIR="$SELF_DIR/texera-multi"
 
 # ---- topology --------------------------------------------------------------
@@ -589,6 +599,11 @@ up_app() {
     # Prepend Node 24 to the frontend window's PATH; $PATH stays literal so it
     # expands in that shell.
     local node_env=""; [[ -n "$NODE24_BIN" ]] && node_env="PATH=$NODE24_BIN:\$PATH "
+    # ng serve otherwise runs with Node's default ~2GB old-space heap and OOMs
+    # (exit 134, "Ineffective mark-compacts near heap limit") mid-compile on
+    # Angular 21. The repo's own `build`/`build:ci` scripts bump the heap to 8G;
+    # its `start` (which we replicate below) does not, so bump it here too.
+    node_env="${node_env}NODE_OPTIONS=--max-old-space-size=8192 "
     # The UI is reached from the Traefik proxy (a separate container), whether it
     # runs in a box (proxy reaches it by name) or on the host (proxy reaches it via
     # the docker host-gateway). Either way ng serve must bind 0.0.0.0 and accept the
@@ -768,6 +783,19 @@ down_multi() { run_multi down; }
 # <target>` auto-dispatches into it (escape with TEXERA_NO_BOX=1).
 DEV_DOCKERFILE="$MULTI_DIR/dev.Dockerfile"
 DEV_IMAGE="${TEXERA_DEV_IMAGE:-texera-dev:latest}"
+# Per-box memory ceiling. Without it every box shares the host RAM unbounded, so
+# when several full stacks (each an ng serve ~3G + a handful of JVMs + inner
+# postgres/minio/lakefs) overcommit, the HOST OOM-killer kills whichever process
+# it likes, taking down random *neighbour* boxes: "the rest keep breaking". A
+# --memory cap makes each box its OWN cgroup OOM domain, so an overcommitting box
+# pages to swap (up to --memory-swap) and, past that, OOMs only its own inner
+# processes, leaving other boxes alone. TEXERA_BOX_MEM='' disables the cap.
+#   RAM ceiling   : TEXERA_BOX_MEM      (default 8g)
+#   RAM+swap total: TEXERA_BOX_MEMSWAP  (default 16g -> up to 8g of swap headroom
+#                   per box so idle stacks page out instead of getting killed;
+#                   needs enough host swap, see 'texera box' notes)
+BOX_MEM="${TEXERA_BOX_MEM-8g}"
+BOX_MEMSWAP="${TEXERA_BOX_MEMSWAP-16g}"
 box_name() { local p; p="$(multi_project)"; [[ -n "$p" ]] && echo "$p-dev"; }
 
 box_build() {
@@ -790,7 +818,18 @@ box_up() {
   elif have_container "$box"; then say "starting existing box '$box'"; "$CE" start "$box" >/dev/null
   else
     say "creating box '$box' (privileged dind; real code bind-mounted at $ROOT)"
-    "$CE" run -d --name "$box" --privileged --restart unless-stopped \
+    # Memory cap so one overcommitting box can't OOM-kill its neighbours (see
+    # BOX_MEM). Empty TEXERA_BOX_MEM -> no cap (old unbounded behaviour).
+    local mem_args=()
+    if [[ -n "$BOX_MEM" ]]; then
+      mem_args=(--memory "$BOX_MEM"); [[ -n "$BOX_MEMSWAP" ]] && mem_args+=(--memory-swap "$BOX_MEMSWAP")
+      ok "memory cap: $BOX_MEM RAM${BOX_MEMSWAP:+ / $BOX_MEMSWAP incl. swap} (TEXERA_BOX_MEM to change)"
+    fi
+    # --init: run tini as PID 1 so orphaned children (a stack's tmux/java/ng after
+    # it is killed or crashes) get reaped instead of piling up as zombies under
+    # the entrypoint's `sleep infinity`, which is not a reaping init.
+    "$CE" run -d --name "$box" --privileged --init --restart unless-stopped \
+      "${mem_args[@]}" \
       --network texera-proxy \
       -v "$ROOT:$ROOT" \
       -v "$HOME/dotfiles/bin:/opt/dotbin:ro" \
@@ -880,6 +919,42 @@ status() {
   local p busy=()
   for p in "${APP_PORTS[@]}"; do port_open "$p" && busy+=("$p"); done
   printf "  app ports:  "; [[ ${#busy[@]} -eq 0 ]] && echo "${c_dim}all free${c_off}" || echo "${c_yel}in use: ${busy[*]}${c_off} (texera free-ports)"
+}
+
+# ---- prune (reclaim docker disk) -------------------------------------------
+# Reclaim disk: dangling images, build cache, and stopped containers. NEVER
+# volumes, so the DB / MinIO / lakeFS data survives. Sweeps the HOST daemon AND
+# every running box's inner dockerd, because docker-in-docker keeps its own
+# images/cache inside each box's docker volume (a host prune can't see those).
+# 'prune all' additionally drops unused *tagged* images (forces a re-pull or
+# rebuild on the next start). Deliberately a separate verb, NOT wired into
+# 'stop' by default: a stopped stack's images look "unused", so an implicit
+# prune would delete exactly the images the next start needs. Opt in per stop
+# with 'texera stop --prune' / '--prune-all'.
+_prune_one() {  # label  engine-cmd...   (engine-cmd = e.g. "$CE"  or  "$CE exec <box> docker")
+  local label="$1"; shift
+  local out
+  out="$("$@" container prune -f 2>/dev/null | grep -iE 'reclaimed|^total:')"; [[ -n "$out" ]] && echo "  [$label] containers:  $out"
+  out="$("$@" image prune -f     2>/dev/null | grep -iE 'reclaimed|^total:')"; [[ -n "$out" ]] && echo "  [$label] images(dang): $out"
+  if [[ -n "${_prune_all:-}" ]]; then
+    out="$("$@" image prune -a -f 2>/dev/null | grep -iE 'reclaimed|^total:')"; [[ -n "$out" ]] && echo "  [$label] images(all):  $out"
+  fi
+  out="$("$@" builder prune -f   2>/dev/null | grep -iE 'reclaimed|^total:')"; [[ -n "$out" ]] && echo "  [$label] build-cache: $out"
+}
+run_prune() {
+  need_ce
+  _prune_all=""; case "${1:-}" in all|-a|aggressive) _prune_all=1 ;; esac
+  say "reclaiming docker disk${_prune_all:+ (aggressive: also unused tagged images)}; volumes are left untouched"
+  _prune_one host "$CE"
+  local b
+  for b in $("$CE" ps --format '{{.Names}}' 2>/dev/null | grep -- '-dev$'); do
+    if "$CE" exec "$b" docker info >/dev/null 2>&1; then
+      _prune_one "$b" "$CE" exec "$b" docker
+    else
+      warn "box '$b' inner docker unreachable, skipping its prune"
+    fi
+  done
+  ok "prune complete (DB / MinIO / lakeFS volumes were NOT touched)"
 }
 
 # ---- debug pipeline --------------------------------------------------------
@@ -982,7 +1057,7 @@ expand_targets() {
 if [[ -z "${TEXERA_DEV_CONTAINER:-}" && -z "${TEXERA_NO_BOX:-}" ]]; then
   _box="$(box_name 2>/dev/null)"
   case "${1:-}" in
-    box|multi|-h|--help|help) _box="" ;;   # host-level commands: never use the box
+    box|multi|prune|-h|--help|help) _box="" ;;   # host-level commands: never use the box (prune sweeps boxes itself)
   esac
   if [[ -n "$_box" ]]; then
     # For app-run targets, create the box on demand so `texera fresh` just
@@ -1019,6 +1094,7 @@ case "$cmd" in
     echo "  ${c_grn}box${c_off} up = DinD dev container for this checkout; after that every 'texera <target>' runs IN it against your real code (box down|shell|status|chown)"
     echo "  ${c_grn}fresh${c_off} = wipe DB + clean rebuild + start dev (from-scratch install test)"
     echo "  ${c_grn}refresh${c_off} = rebuild + restart app, no data wipe (after code changes)"
+    echo "  ${c_grn}prune${c_off} = reclaim docker disk (host + boxes: dangling images, build cache, stopped containers; 'prune all' also unused images; volumes never touched)"
     read -rp "start> " line
     [[ -n "${line:-}" ]] || die "nothing selected"
     read -ra TGTS <<< "$line"
@@ -1026,11 +1102,23 @@ case "$cmd" in
     ;;
   stop|down)
     shift
+    # optional trailing --prune / --prune-all: reclaim docker disk AFTER stopping
+    STOP_PRUNE=""; STOP_ARGS=()
+    for a in "$@"; do
+      case "$a" in
+        --prune)     STOP_PRUNE=safe ;;
+        --prune-all) STOP_PRUNE=all ;;
+        *)           STOP_ARGS+=("$a") ;;
+      esac
+    done
+    set -- "${STOP_ARGS[@]}"
     if [[ $# -eq 0 ]]; then set -- dev; fi   # default: tear down the local dev stack
     # stop in reverse dependency order (app first, db last)
     mapfile -t T < <(expand_targets "$@" | tac)
     for t in "${T[@]}"; do stop_target "$t"; done
+    [[ -n "$STOP_PRUNE" ]] && run_prune "$([[ "$STOP_PRUNE" == all ]] && echo all)"
     ;;
+  prune)   shift; run_prune "${1:-}" ;;   # reclaim docker disk (host + boxes); 'prune all' also drops unused images; volumes never touched
   box)     shift; run_box "$@" ;;     # DinD dev box: run all targets in-container against real code
   multi)   shift; run_multi "${1:-up}" ;;   # this checkout as an isolated, proxied instance (many checkouts at once)
   debug)   shift; run_debug "$@" ;;   # full debug pipeline (engine under JDWP on :5005)
