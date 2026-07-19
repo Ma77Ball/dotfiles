@@ -5,8 +5,8 @@ return {
     "coder/claudecode.nvim",
     config = function()
       require("claudecode").setup({
-        -- start every session in `auto` permission mode with Fable 5 as the default model
-        terminal_cmd = "claude --permission-mode auto --model claude-fable-5",
+        -- start every session in `auto` permission mode with Opus 4.8 as the default model
+        terminal_cmd = "claude --permission-mode auto --model claude-opus-4-8", -- do not change unless you ask admin should use opus 4.8 
         terminal = {
           provider = "native",
           split_width_percentage = 0.30,

@@ -1,6 +1,12 @@
 vim.g.mapleader = " "
 
 vim.keymap.set("i", "jj", "<Esc>", { desc = "Exit insert mode" })
+
+-- Disable the built-in `s` substitute (identical to `cl`), so a mistimed
+-- `<leader>s...` chord can't fall through to a destructive edit. Frees the
+-- `s` prefix for the remote-SSH mappings (see plugins/remote-nvim.lua).
+-- Use `cl`/`S` instead.
+vim.keymap.set({ "n", "x" }, "s", "<Nop>", { desc = "disabled (use cl/S)" })
 vim.keymap.set("n", "<leader>pv", function()
   vim.cmd("Neotree filesystem toggle")
 end, { desc = "Neo-tree toggle" })
@@ -45,3 +51,4 @@ end, { desc = 'Toggle line wrap' })
 
 -- Tabs (tn/tc are taken by Python DAP debug mappings).
 vim.keymap.set("n", "<leader>tt", "<cmd>tabnew<cr>",   { desc = "Tab: new" })
+vim.keymap.set("n", "<leader>to", "<cmd>tabonly<cr>",  { desc = "Tab: close all others" })
