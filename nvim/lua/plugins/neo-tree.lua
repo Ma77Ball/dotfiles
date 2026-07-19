@@ -30,6 +30,17 @@ return {
             "dist",
             "target",
           },
+          -- whitelist: always show these regardless of gitignore.
+          -- always_show matches exact node NAMES; always_show_by_pattern
+          -- matches full paths via glob. To reveal a whole gitignored
+          -- folder, list the dir name (so it appears) AND a "*/dir/*"
+          -- pattern (so its contents appear).
+          always_show = {
+            "reference",
+          },
+          always_show_by_pattern = {
+            "*/reference/*",
+          },
         }
       )
 
