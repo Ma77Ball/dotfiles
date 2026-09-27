@@ -12,6 +12,7 @@ return
       ensure_installed = {
         'java', 'lua', 'python', 'scala',
         'typescript', 'tsx', 'javascript',
+        'c', 'cpp',
       },
       auto_install = true,
       highlight = { enable = true },

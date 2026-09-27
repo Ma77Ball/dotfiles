@@ -41,6 +41,7 @@ return {
           "ruff", -- Python linting/formatting
           "ts_ls", -- TypeScript / JavaScript
           "html",
+          "clangd", -- C / C++
           "jdtls", -- installed by Mason, but started/configured by nvim-jdtls (see ftplugin/java.lua)
         },
         -- let nvim-jdtls launch jdtls instead of auto-enabling it here
@@ -80,6 +81,21 @@ return {
                  }
                }
              })
+          end,
+
+          -- clangd (C/C++). For loose LeetCode files with no build system, drop a
+          -- compile_flags.txt at the leetcode root (e.g. `-std=c++20`) -- clangd
+          -- walks up to find it, so one file covers every problem folder.
+          ["clangd"] = function()
+            lspconfig.clangd.setup({
+              capabilities = capabilities,
+              cmd = {
+                "clangd",
+                "--background-index",
+                "--clang-tidy",
+                "--header-insertion=never",
+              },
+            })
           end,
 
           -- Ruff config (mostly default is good for now)

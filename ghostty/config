@@ -13,8 +13,25 @@ font-family = "JetBrains Mono"
 font-size = 13
 background-opacity = 0.9
 
+# Extend the edge cell's color into the window padding instead of showing the
+# background color there. Removes the blue strip around a full-screen app
+# (e.g. nvim's black not reaching the window edges when running inside zellij).
+window-padding-color = extend
+
 # No tab bar (also removes the new-tab "+" button).
 window-show-tab-bar = never
+
+# Release Ctrl+Shift+T so it passes through to Zellij, which opens a new
+# (persistent, reboot-surviving) tab instead of a throwaway Ghostty tab.
+keybind = ctrl+shift+t=unbind
+
+# Release Ctrl+Tab / Ctrl+Shift+Tab so Zellij handles tab switching.
+keybind = ctrl+tab=unbind
+keybind = ctrl+shift+tab=unbind
+
+# Release Ctrl+Shift+W so it closes the focused Zellij pane/tab instead of the
+# whole terminal window.
+keybind = ctrl+shift+w=unbind
 
 # Let the shell set the window title (see ~/.bashrc.d/ghostty-title.sh, which
 # shows the git branch). Without this, Ghostty's own integration overrides the

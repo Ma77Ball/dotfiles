@@ -19,6 +19,8 @@ return {
         json = { "jq" },
         jsonc = { "jq" },
         jsonl = { "jqlines" },
+        c = { "clang-format" },
+        cpp = { "clang-format" },
       },
       -- format on save
       format_on_save = { timeout_ms = 1000, lsp_format = "fallback" },

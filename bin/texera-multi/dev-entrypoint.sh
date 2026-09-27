@@ -10,6 +10,16 @@
 set -euo pipefail
 
 echo "[dev-box] starting inner dockerd..."
+# Clear stale pidfiles from a previous life of THIS container. A box runs with
+# --restart unless-stopped, and a restart (host reboot / outer-daemon restart)
+# preserves the container's /var/run, so last run's /var/run/docker.pid (and
+# containerd's) survive. dockerd refuses to start if that recorded PID happens
+# to be occupied by any live process on the new boot ("process with PID N is
+# still running"), a race that hits some boxes and not others: that is why the
+# first box comes up but follow-on boxes intermittently report the inner daemon
+# unavailable. No dockerd runs yet at entrypoint time (we are PID 1), so
+# removing the pidfiles is always safe.
+rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid 2>/dev/null || true
 # overlay2 works because /var/lib/docker is a real volume, not the overlay
 # rootfs. Log to a file so `texera box logs`/docker logs stay readable.
 dockerd >/var/log/dockerd.log 2>&1 &

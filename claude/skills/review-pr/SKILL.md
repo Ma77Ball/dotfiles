@@ -8,13 +8,15 @@ version: 1.0.0
 
 Goal: leave high-signal inline comments on a PR, each with a concrete fix, and prefer click-to-commit `suggestion` blocks so the author can apply them in one click. Always leave the review **PENDING** so the human reads every comment before submitting.
 
+**Keep every review very simple.** Favor a small number of clear comments over a thorough sweep. Each comment is short: one or two plain sentences, then the fix. Whenever the fix is an in-place edit, express it as a `suggestion` block rather than describing it in prose, so the author applies it in one click. Prose-only comments are the exception, not the norm.
+
 ## Operating rules
 
 - **Never submit.** Create a pending review (omit `event` in the API call). The author submits.
-- **Prefer suggestion blocks** wherever a finding maps to a contiguous, in-place edit. Fall back to a fenced code block only when the fix spans multiple, non-adjacent regions or is a design change.
+- **Always reach for a suggestion block first.** Wherever a finding maps to a contiguous, in-place edit, write it as a `suggestion` so the author commits it in one click. Fall back to a fenced code block or prose only when the fix spans multiple, non-adjacent regions or is a design change, and say why.
 - **One finding per comment.** Anchor it to the exact line(s) the fix touches.
-- **Be concise and actionable.** State the problem in one or two sentences, then the fix. No restating the diff back to the author.
-- **Signal over volume.** Report real correctness/logic bugs and concrete quality wins. Skip nitpicks that don't change behavior or clarity. Do not pad to hit a count.
+- **Keep it simple and short.** One or two plain sentences on the problem, then the fix (ideally the suggestion block). No restating the diff, no essays, no hedging.
+- **Signal over volume.** Report only real correctness/logic bugs and concrete quality wins. Prefer a handful of solid comments over an exhaustive list. Skip nitpicks that don't change behavior or clarity. Do not pad to hit a count.
 - **No em dashes** in any comment text (a hook blocks them on tool input). Use commas, colons, or hyphens.
 - **Say what you did not verify.** If you reviewed statically and did not run it, note that at the end.
 
@@ -107,4 +109,11 @@ Notes:
 
 ## Close-out
 
-Tell the user: the review is PENDING, how many comments, which are one-click suggestions vs manual, and how to submit (Files changed tab, the comments show under "Pending" with a Submit review button). State anything you did not run or verify, and offer to smoke-test specific behavior if useful.
+Keep the chat summary short. Tell the user: the review is PENDING, how many comments, and how many are one-click suggestions vs manual. State anything you did not run or verify.
+
+**Always end with a clickable link to the PR** so the user can jump straight to it, on its own line as the last thing in the message. Get the canonical URL with `gh pr view <n> --repo <owner>/<repo> --json url -q .url` (or reuse the URL the user gave you). Point them to the **Files changed** tab, where the comments appear under "Pending" with a **Submit review** button. Example:
+
+```
+Review is pending with 2 comments (both one-click suggestions). Open it here to read and submit:
+https://github.com/<owner>/<repo>/pull/<n>/files
+```

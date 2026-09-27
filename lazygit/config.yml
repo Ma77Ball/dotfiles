@@ -1,0 +1,14 @@
+# Edit files -- and commit messages -- in Neovim instead of Fedora's default
+# $EDITOR (nano, set by /etc/profile.d/nano-default-editor.sh). This drives the
+# `e` (edit file) action and the commit-message editor reached via <c-o> in the
+# commit panel. editPreset is applied at launch, so it doesn't depend on $EDITOR.
+os:
+  editPreset: nvim
+
+keybinding:
+  universal:
+    # Scroll the main (right-hand) diff/changes view with Ctrl-j/Ctrl-k
+    # instead of PgDn/PgUp. The main view only scrolls vertically, so there
+    # is no Ctrl-h/Ctrl-l (horizontal) equivalent to bind.
+    scrollUpMain: <c-k>
+    scrollDownMain: <c-j>

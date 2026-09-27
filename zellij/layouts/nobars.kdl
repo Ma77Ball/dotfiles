@@ -1,0 +1,6 @@
+// Fully bar-less: no top tab-bar, no bottom status-bar, just the terminal.
+// Tabs still work (Ctrl+Shift+T, Ctrl+Tab / Ctrl+Shift+Tab) - they're just
+// not shown on screen.
+layout {
+    pane
+}

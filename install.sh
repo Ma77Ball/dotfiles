@@ -178,6 +178,21 @@ else
     fi
 fi
 
+echo "--- Installing Zellij (terminal multiplexer) ---"
+# Persistent, reboot-surviving terminal sessions. Native package first, cargo fallback.
+if command -v zellij > /dev/null 2>&1; then
+    echo "Zellij already installed."
+else
+    case "$PM" in
+        dnf)    sudo dnf install -y zellij || true ;;
+        pacman) sudo pacman -S --needed --noconfirm zellij || true ;;
+    esac
+    if ! command -v zellij > /dev/null 2>&1 && command -v cargo > /dev/null 2>&1; then
+        echo "Installing Zellij via cargo..."
+        cargo install zellij || echo "  (cargo zellij failed - see https://zellij.dev)"
+    fi
+fi
+
 echo "--- Installing bin commands ---"
 # Symlink each command in dotfiles/bin into ~/.local/bin.
 if [ -d "$DIR/bin" ]; then
@@ -201,11 +216,45 @@ if [ -d "$DIR/claude/skills" ]; then
     done
 fi
 
+echo "--- Scaffolding Claude work account (~/.claude-work) ---"
+# Second Claude Code account: a separate CLAUDE_CONFIG_DIR with its own creds.
+# Credentials are machine-local and NEVER stored in dotfiles -- authenticate once
+# with: CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude   (then /login). Switch
+# accounts inside Neovim with <leader>ca (see nvim/lua/claude_accounts.lua).
+# Skills are shared via symlink; CLAUDE.md / settings.json are seeded (copied, so
+# the two accounts can diverge) from the personal account if present.
+WORK_CLAUDE="$HOME/.claude-work"
+if [ -d "$DIR/claude/skills" ]; then
+    mkdir -p "$WORK_CLAUDE/skills"
+    for skill in "$DIR"/claude/skills/*/; do
+        [ -d "$skill" ] || continue
+        name="$(basename "$skill")"
+        create_symlink "${skill%/}" "$WORK_CLAUDE/skills/$name"
+    done
+fi
+for f in CLAUDE.md settings.json; do
+    if [ -e "$HOME/.claude/$f" ] && [ ! -e "$WORK_CLAUDE/$f" ]; then
+        echo "Seeding ~/.claude-work/$f from personal account..."
+        cp "$HOME/.claude/$f" "$WORK_CLAUDE/$f"
+    fi
+done
+
 echo "--- Configuring Neovim ---"
 create_symlink "$DIR/nvim" "$HOME/.config/nvim"
 
 echo "--- Configuring Ghostty ---"
 create_symlink "$DIR/ghostty" "$HOME/.config/ghostty"
+
+echo "--- Configuring Zellij ---"
+# Symlink individual files (not the whole dir) so Zellij's auto-generated
+# config.kdl.bak / *.bak.1 files stay in ~/.config/zellij, out of this repo.
+mkdir -p "$HOME/.config/zellij/layouts"
+create_symlink "$DIR/zellij/config.kdl" "$HOME/.config/zellij/config.kdl"
+create_symlink "$DIR/zellij/layouts/nobars.kdl" "$HOME/.config/zellij/layouts/nobars.kdl"
+
+echo "--- Configuring Lazygit ---"
+# Whole dir (like nvim/ghostty); lazygit keeps its state.yml in ~/.local/state.
+create_symlink "$DIR/lazygit" "$HOME/.config/lazygit"
 
 echo "--- Configuring ghme (gh-dash) ---"
 create_symlink "$DIR/gh-dash" "$HOME/.config/gh-dash"
@@ -217,6 +266,10 @@ create_symlink "$DIR/msgme-config" "$HOME/.config/msgme"
 echo "--- Configuring shell (Ghostty git-branch title) ---"
 # Auto-sourced from ~/.bashrc.d/ by the loader below.
 create_symlink "$DIR/bashrc.d/ghostty-title.sh" "$HOME/.bashrc.d/ghostty-title.sh"
+# Zellij session launcher (prompts to name/rejoin a session on each new terminal).
+create_symlink "$DIR/bashrc.d/zellij.sh" "$HOME/.bashrc.d/zellij.sh"
+# Prefer Neovim over the system default (nano) as $EDITOR / $VISUAL.
+create_symlink "$DIR/bashrc.d/editor.sh" "$HOME/.bashrc.d/editor.sh"
 
 echo "--- Ensuring ~/.bashrc loads ~/.local/bin and ~/.bashrc.d ---"
 # Append a PATH + ~/.bashrc.d loader to ~/.bashrc unless it already sources it.
