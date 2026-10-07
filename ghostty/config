@@ -33,6 +33,12 @@ keybind = ctrl+shift+tab=unbind
 # whole terminal window.
 keybind = ctrl+shift+w=unbind
 
+# Disable Ghostty's native window splitting. It divides the screen and gets in
+# the way of working alongside other apps, so let these pass through to the
+# shell / Zellij instead of creating a Ghostty split.
+keybind = ctrl+shift+e=unbind
+keybind = ctrl+shift+o=unbind
+
 # Let the shell set the window title (see ~/.bashrc.d/ghostty-title.sh, which
 # shows the git branch). Without this, Ghostty's own integration overrides the
 # title with the working directory.

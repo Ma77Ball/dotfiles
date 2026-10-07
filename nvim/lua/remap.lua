@@ -36,12 +36,24 @@ vim.keymap.set("n", "<leader>r", function()
   end
 end)
 
+-- ":Perf" / ":Perf!": filetype-aware compiled-output viewer (see lua/perf.lua).
+require("perf").setup()
+vim.keymap.set("n", "<leader>P", "<cmd>Perf<cr>", { desc = "Perf: compiled output of current file" })
+vim.keymap.set("n", "<leader>tp", "<cmd>Perf!<cr>", { desc = "Perf: JMH perfasm of method under cursor" })
+
 -- Remap jump-forward to Ctrl-Enter; use Tab/Shift-Tab to indent/outdent.
 vim.keymap.set("n", "<C-CR>", "<C-i>", { desc = "Jump forward (jumplist)" })
 vim.keymap.set("n", "<Tab>", ">>", { desc = "Indent line" })
 vim.keymap.set("n", "<S-Tab>", "<<", { desc = "Outdent line" })
 vim.keymap.set("x", "<Tab>", ">gv", { desc = "Indent selection" })
 vim.keymap.set("x", "<S-Tab>", "<gv", { desc = "Outdent selection" })
+
+-- Visual-mode delete discards to the black-hole register instead of the system
+-- clipboard. With clipboard=unnamedplus (see options.lua) a plain `d`/`x` would
+-- otherwise overwrite what you copied every time you delete a selection. Yank
+-- (`y`) still copies to the clipboard as normal.
+vim.keymap.set("x", "d", "\"_d", { desc = "Delete selection (no clipboard)" })
+vim.keymap.set("x", "x", "\"_x", { desc = "Delete selection (no clipboard)" })
 
 -- Diagnostic keymaps
 vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, { desc = 'Go to previous diagnostic message' })

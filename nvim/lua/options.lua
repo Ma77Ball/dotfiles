@@ -1,6 +1,17 @@
 -- Use the system clipboard for all yank/delete/paste.
 vim.opt.clipboard = "unnamedplus"
 
+-- Indentation: 2-space, spaces only. Keeps typing/Enter aligned with what
+-- clang-format produces on save (LLVM base, IndentWidth 2), so a new line lands
+-- at the right column instead of an 8-wide tab stop. Filetypes that require tabs
+-- (Makefiles, Go) get them back from their own ftplugin.
+vim.opt.expandtab = true      -- <Tab> inserts spaces
+vim.opt.shiftwidth = 2        -- size of an indent (>>, autoindent, o/O)
+vim.opt.tabstop = 2           -- a literal tab renders as 2 columns
+vim.opt.softtabstop = 2       -- <Tab>/<BS> move by 2 in insert mode
+vim.opt.autoindent = true     -- new line keeps the current indent
+vim.opt.smartindent = true    -- add an indent after {, etc.
+
 -- Enable the mouse in ALL modes, including terminal mode ('t'). Neovim's default
 -- is "nvi" (normal/visual/insert only), which leaves the wheel dead inside a
 -- terminal buffer -- e.g. the Claude split, which runs in terminal mode. With
