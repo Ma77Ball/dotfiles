@@ -13,6 +13,8 @@ return
         'java', 'lua', 'python', 'scala',
         'typescript', 'tsx', 'javascript',
         'c', 'cpp',
+        'html', 'css', -- markup/styles: highlighting, indent, and tag-aware folding
+
       },
       auto_install = true,
       highlight = { enable = true },

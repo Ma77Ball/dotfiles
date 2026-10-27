@@ -41,6 +41,7 @@ return {
           "ruff", -- Python linting/formatting
           "ts_ls", -- TypeScript / JavaScript
           "html",
+          "emmet_language_server", -- Emmet abbreviation expansion (html/css/jsx). Expand via <C-Space> completion.
           "clangd", -- C / C++
           "jdtls", -- installed by Mason, but started/configured by nvim-jdtls (see ftplugin/java.lua)
         },

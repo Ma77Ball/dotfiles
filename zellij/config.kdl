@@ -649,6 +649,15 @@ show_startup_tips false
 // can be useful for removing wrappers around commands
 // Note: be sure to escape backslashes and similar characters properly
 // post_command_discovery_hook "echo $RESURRECT_COMMAND | sed <your_regex_here>"
+//
+// Don't resurrect editor panes. Zellij serializes a pane running `nvim .` as an
+// `edit=` pane and rebuilds its absolute path by concatenating the cwd twice
+// (e.g. .../Obs_Texera/Texera_Projects/Obs_Texera/.), so on reboot it re-spawns
+// nvim on a bogus directory that can't be found -- a zombie process that never
+// quits cleanly and leaves an orphaned swap file behind. Rewrite any discovered
+// editor command to a plain shell so the pane (and its cwd) still comes back,
+// just without nvim relaunching.
+post_command_discovery_hook "set -- $RESURRECT_COMMAND; case \"${1##*/}\" in nvim|vim|vi|view|nview) echo \"${SHELL:-/bin/bash}\" ;; *) echo \"$RESURRECT_COMMAND\" ;; esac"
 
 // Number of async worker tasks to spawn per active client.
 //

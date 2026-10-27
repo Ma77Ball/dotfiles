@@ -23,6 +23,8 @@ return {
           "js-debug-adapter",
           -- C / C++
           "clang-format", -- used by conform.nvim for c/cpp
+          -- HTML / CSS
+          "prettier", -- used by conform.nvim for html/css
         },
       })
     end,
