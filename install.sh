@@ -216,6 +216,28 @@ if [ -d "$DIR/claude/skills" ]; then
     done
 fi
 
+echo "--- Configuring Claude Code (global CLAUDE.md, settings, hooks) ---"
+mkdir -p "$HOME/.claude"
+# CLAUDE.md: portable skill triggers / global instructions -- symlink so repo edits propagate.
+if [ -f "$DIR/claude/CLAUDE.md" ]; then
+    create_symlink "$DIR/claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
+fi
+# Hooks referenced by settings.json (via $HOME/.claude/hooks/...) -- symlink each one.
+if [ -d "$DIR/claude/hooks" ]; then
+    mkdir -p "$HOME/.claude/hooks"
+    for hook in "$DIR"/claude/hooks/*; do
+        [ -f "$hook" ] || continue
+        create_symlink "$hook" "$HOME/.claude/hooks/$(basename "$hook")"
+    done
+fi
+# settings.json: SEED (copy) rather than symlink -- the live file carries per-machine
+# auto-mode security context that is stripped from the vendored template, so we never
+# clobber an existing one; a fresh machine gets the template to build on.
+if [ -f "$DIR/claude/settings.json" ] && [ ! -e "$HOME/.claude/settings.json" ]; then
+    echo "Seeding ~/.claude/settings.json from the dotfiles template..."
+    cp "$DIR/claude/settings.json" "$HOME/.claude/settings.json"
+fi
+
 echo "--- Scaffolding Claude work account (~/.claude-work) ---"
 # Second Claude Code account: a separate CLAUDE_CONFIG_DIR with its own creds.
 # Credentials are machine-local and NEVER stored in dotfiles -- authenticate once
@@ -346,6 +368,52 @@ echo "--- Setting Ghostty as the default terminal ---"
 # xdg-terminal-exec (used by GNOME/file managers) reads this list.
 echo "com.mitchellh.ghostty.desktop" > "$HOME/.config/xdg-terminals.list"
 
+echo "--- Configuring GNOME shortcut (Ctrl+T launches Ghostty) ---"
+# System-level keybinding, NOT a dotfile: GNOME stores custom shortcuts in dconf,
+# so a symlink can't carry it -- it must be written with gsettings on each box.
+# See MANUAL-SETUP.md for the full list of non-file (dconf/device) changes.
+if command -v gsettings > /dev/null 2>&1 && \
+   gsettings list-schemas 2>/dev/null | grep -q '^org.gnome.settings-daemon.plugins.media-keys$'; then
+    # Command to launch: native binary if on PATH, else Flatpak.
+    GHOSTTY_CMD="$(command -v ghostty 2>/dev/null || true)"
+    if [ -z "$GHOSTTY_CMD" ]; then
+        if command -v flatpak > /dev/null 2>&1 && flatpak info com.mitchellh.ghostty > /dev/null 2>&1; then
+            GHOSTTY_CMD="flatpak run com.mitchellh.ghostty"
+        else
+            GHOSTTY_CMD="/usr/bin/ghostty"
+        fi
+    fi
+    MK="org.gnome.settings-daemon.plugins.media-keys"
+    KBS="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
+    BASE="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings"
+    existing="$(gsettings get "$MK" custom-keybindings 2>/dev/null)"
+    # Already bound to Ghostty anywhere? Then leave the user's shortcuts alone.
+    have_ghostty=0
+    for p in $(printf '%s' "$existing" | grep -oE "$BASE/custom[0-9]+/"); do
+        case "$(gsettings get "$KBS:$p" command 2>/dev/null)" in
+            *ghostty*) have_ghostty=1 ;;
+        esac
+    done
+    if [ "$have_ghostty" -eq 1 ]; then
+        echo "  Ghostty shortcut already configured - leaving it as is."
+    else
+        # Find the next free customN slot so we never clobber an existing shortcut.
+        i=0
+        while printf '%s' "$existing" | grep -q "$BASE/custom$i/"; do i=$((i+1)); done
+        newp="$BASE/custom$i/"
+        gsettings set "$KBS:$newp" name 'Terminal'
+        gsettings set "$KBS:$newp" command "$GHOSTTY_CMD"
+        gsettings set "$KBS:$newp" binding '<Control>t'
+        case "$existing" in
+            "@as []"|"[]"|"") gsettings set "$MK" custom-keybindings "['$newp']" ;;
+            *)                gsettings set "$MK" custom-keybindings "$(printf '%s' "$existing" | sed "s|]\$|, '$newp']|")" ;;
+        esac
+        echo "  Bound Ctrl+T to '$GHOSTTY_CMD' (GNOME slot custom$i)."
+    fi
+else
+    echo "  Not GNOME (or no gsettings) - bind 'Ctrl+T -> ghostty' yourself. See MANUAL-SETUP.md."
+fi
+
 echo "--- Installing Custom Desktop Applications ---"
 for desktop_file in "$DIR"/custom_apps/*.desktop; do
     if [ -f "$desktop_file" ]; then
@@ -371,3 +439,7 @@ if command -v update-desktop-database > /dev/null; then
 fi
 
 echo "--- Setup Complete! ---"
+echo
+echo "Some changes live outside config files (dconf shortcuts, device remaps, font"
+echo "cache, Ghostty restart). See MANUAL-SETUP.md for anything install.sh can't do"
+echo "automatically, and log out/in (or reboot) so GNOME picks up the new shortcut."

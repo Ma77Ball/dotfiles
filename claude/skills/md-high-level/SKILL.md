@@ -54,6 +54,13 @@ on GitHub and most markdown viewers. Aim for 2 to 4 diagrams that carry the expl
    - `sequenceDiagram` for who-talks-to-whom over time
    Keep each diagram small (a handful of nodes). A diagram should be glanceable.
 
+   **Black background, black node fill, white text, vary only the stroke.** Light or tinted fills and the default light canvas wash out and are hard to read across viewers and themes. So:
+   - **Canvas:** start every diagram with a pure-black-background init directive: `%%{init: {'theme':'dark', 'themeVariables': {'background':'#000000','lineColor':'#000000'}}}%%` on the line ABOVE `flowchart`. The `dark` theme keeps edge labels readable; the override forces a pure black canvas.
+   - **Arrows: black by default.** Most viewers render the canvas light, where light/gray arrows look white and vanish, so set `lineColor` to `#000000` (or a strong color like `#0F766E`), never a light gray. Same rule for sequence diagrams via `signalColor:'#000000'`.
+   - **Nodes:** give every flowchart a `classDef default fill:#000,color:#fff,stroke:#888,stroke-width:1px` so all nodes are black with white text, then distinguish special nodes by STROKE color only (keep `fill:#000,color:#fff`): green stroke `#1B7F3B` for good/success, rust stroke `#B0451E` for bad/failure, teal stroke `#0F766E` for accent.
+   - **Sequence diagrams:** get the same look with `%%{init: {'theme':'dark', 'themeVariables': {'background':'#000000','lineColor':'#000000','signalColor':'#000000','signalTextColor':'#000000','actorBkg':'#000000','actorTextColor':'#ffffff','actorBorder':'#888888','noteBkgColor':'#000000','noteTextColor':'#ffffff'}}}%%`.
+   Never use light fills like `#d4edda` or `#f8d7da`, never leave the default light canvas, and never leave arrows light/gray (they read as white).
+
 **Use before/after and comparison tables.** For fixes or changes, a two-column
 Before | After table makes the point instantly. Use tables for settings/values too.
 

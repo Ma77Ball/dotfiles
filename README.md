@@ -48,7 +48,7 @@ flowchart TD
 | `ghme/` | A **third-party fork** of `gh-dash` (the GitHub dashboard). Left as upstream code. |
 | `nvim/` | Neovim (text editor) configuration. |
 | `ghostty/` | Configuration for the Ghostty terminal emulator. |
-| `claude/skills/` | Claude Code skills, symlinked into `~/.claude/skills`. |
+| `claude/` | Claude Code config: `skills/` (symlinked into `~/.claude/skills`), global `CLAUDE.md`, `hooks/`, and a sanitized `settings.json` template (per-machine security context is stripped; seeded only if none exists). |
 | `bashrc.d/` | Bits of shell setup loaded by `.bashrc`. |
 | `custom_apps/`, `Icons/` | Desktop launcher entries and their icons. |
 | `*-config/`, `gh-dash/` | Runtime config files the tools read at startup. |
@@ -84,6 +84,11 @@ Key links it creates:
 | `bin/*` | `~/.local/bin/*` |
 | `bashrc.d/ghostty-title.sh` | `~/.bashrc.d/` |
 | `claude/skills/*` | `~/.claude/skills/*` |
+| `claude/CLAUDE.md` | `~/.claude/CLAUDE.md` |
+| `claude/hooks/*` | `~/.claude/hooks/*` |
+| `claude/settings.json` | seeded (copied) to `~/.claude/settings.json` if absent |
+
+Some settings don't live in a symlinkable file - GNOME shortcuts (like `Ctrl+T` to launch Ghostty), device remaps, the font cache. `install.sh` applies what it can with `gsettings`/`fc-cache`; anything manual is written up in **[MANUAL-SETUP.md](MANUAL-SETUP.md)**.
 
 ---
 
