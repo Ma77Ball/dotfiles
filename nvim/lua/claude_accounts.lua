@@ -24,11 +24,111 @@
 local M = {}
 
 -- Shared launch settings -- keep in sync with plugins/claude.lua's setup().
-local TERM_CMD = "claude --permission-mode auto --model claude-opus-4-8"
+local TERM_CMD = "claude --continue --permission-mode auto --model claude-opus-4-8"
 local TERM_OPTS = { provider = "native", split_width_percentage = 0.30 }
 
 -- Where the account list is persisted (a JSON array of { name, dir }).
 local SAVE_FILE = vim.fn.stdpath("data") .. "/claude_accounts.json"
+
+-- The account last switched to (via <leader>ca), remembered PER FOLDER so each
+-- project reopens Claude on the account you last used *there* -- including an
+-- nvim brought back by a zellij session resurrection after a reboot. Persisted
+-- as a JSON map { "<cwd>": "<account name>", ... } plus a "__last" key holding
+-- the most recent choice anywhere, used as the fallback for a folder with no
+-- record yet. (Replaces the old single-value claude_account_last.txt, which was
+-- global and so leaked one folder's choice onto every other folder.)
+local LAST_FILE = vim.fn.stdpath("data") .. "/claude_account_last.json"
+local LEGACY_LAST_FILE = vim.fn.stdpath("data") .. "/claude_account_last.txt"
+
+-- The folder key: the global cwd, independent of any window-local :lcd.
+local function cwd_key()
+  return vim.fn.getcwd(-1, -1)
+end
+
+local function read_last_map()
+  local f = io.open(LAST_FILE, "r")
+  if f then
+    local content = f:read("*a")
+    f:close()
+    if content and content ~= "" then
+      local ok, data = pcall(vim.json.decode, content)
+      if ok and type(data) == "table" then
+        return data
+      end
+    end
+    return {}
+  end
+  -- One-time migration: seed the global fallback from the old single-value file.
+  local lf = io.open(LEGACY_LAST_FILE, "r")
+  if lf then
+    local name = vim.trim(lf:read("*a") or "")
+    lf:close()
+    if name ~= "" then
+      return { __last = name }
+    end
+  end
+  return {}
+end
+
+local function write_last_map(map)
+  local f = io.open(LAST_FILE, "w")
+  if f then
+    f:write(vim.json.encode(map))
+    f:close()
+  end
+end
+
+-- Record `name` for the current folder, and as the global fallback.
+local function save_last(name)
+  name = name or ""
+  local map = read_last_map()
+  map[cwd_key()] = name
+  map.__last = name
+  write_last_map(map)
+end
+
+-- The account remembered for the current folder, else the most recent choice
+-- anywhere ("__last"), else nil.
+local function load_last()
+  local map = read_last_map()
+  local name = map[cwd_key()]
+  if not name or vim.trim(name) == "" then
+    name = map.__last
+  end
+  name = name and vim.trim(name) or ""
+  return name ~= "" and name or nil
+end
+
+-- Rename every stored reference to an account (used when the account is renamed).
+local function rename_last(old, new)
+  local map = read_last_map()
+  local changed = false
+  for k, v in pairs(map) do
+    if v == old then
+      map[k] = new
+      changed = true
+    end
+  end
+  if changed then
+    write_last_map(map)
+  end
+end
+
+-- Forget every stored reference to an account (used when the account is deleted),
+-- so no folder keeps pinning it; those folders fall back to the default.
+local function forget_last(name)
+  local map = read_last_map()
+  local changed = false
+  for k, v in pairs(map) do
+    if v == name then
+      map[k] = nil
+      changed = true
+    end
+  end
+  if changed then
+    write_last_map(map)
+  end
+end
 
 -- First-run seed only. Entries whose dir does not exist are skipped, so this
 -- stays portable across machines that only have the personal account.
@@ -142,17 +242,32 @@ function M.use(acc)
   vim.g.claude_account = acc.name
 end
 
--- Seed the default account (first one whose dir exists) so <leader>cc works
--- before any pick.
+-- Seed the account used for <leader>cc before any pick. Prefers the account you
+-- last switched to (persisted in LAST_FILE), so Claude comes back on it across
+-- restarts; otherwise falls back to the first account whose dir exists.
 function M.apply_default()
   local list = store_list()
   local pick
-  for _, a in ipairs(list) do
-    if vim.fn.isdirectory(a.dir) == 1 then
-      pick = a
-      break
+
+  local last = load_last()
+  if last then
+    for _, a in ipairs(list) do
+      if a.name == last and vim.fn.isdirectory(a.dir) == 1 then
+        pick = a
+        break
+      end
     end
   end
+
+  if not pick then
+    for _, a in ipairs(list) do
+      if vim.fn.isdirectory(a.dir) == 1 then
+        pick = a
+        break
+      end
+    end
+  end
+
   pick = pick or list[1]
   if pick then
     M.use(pick)
@@ -162,6 +277,7 @@ end
 -- Close any live session and relaunch Claude under `acc`.
 local function switch_to(acc, note)
   M.use(acc)
+  save_last(acc.name) -- remember this choice for the next launch
   pcall(vim.cmd, "ClaudeCodeClose") -- end the current session
   vim.cmd("ClaudeCodeOpen") -- relaunch under the chosen account
   vim.notify("Claude account: " .. acc.name .. (note or ""))
@@ -255,6 +371,7 @@ local function rename_account(after)
         if vim.g.claude_account == sel.name then
           vim.g.claude_account = newname
         end
+        rename_last(sel.name, newname) -- keep every folder's pin pointing at it
         vim.notify("Renamed '" .. sel.name .. "' -> '" .. newname .. "'")
         if after then
           after()
@@ -292,6 +409,7 @@ local function delete_account(after)
     if vim.g.claude_account == sel.name then
       vim.g.claude_account = nil
     end
+    forget_last(sel.name) -- stop every folder pinning a deleted account
 
     local note = " (removed from switcher; dir left on disk)"
     if vim.fn.isdirectory(sel.dir) == 1 and safe_to_delete(sel.dir) then

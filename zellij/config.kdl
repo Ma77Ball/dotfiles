@@ -650,14 +650,18 @@ show_startup_tips false
 // Note: be sure to escape backslashes and similar characters properly
 // post_command_discovery_hook "echo $RESURRECT_COMMAND | sed <your_regex_here>"
 //
-// Don't resurrect editor panes. Zellij serializes a pane running `nvim .` as an
-// `edit=` pane and rebuilds its absolute path by concatenating the cwd twice
-// (e.g. .../Obs_Texera/Texera_Projects/Obs_Texera/.), so on reboot it re-spawns
-// nvim on a bogus directory that can't be found -- a zombie process that never
-// quits cleanly and leaves an orphaned swap file behind. Rewrite any discovered
-// editor command to a plain shell so the pane (and its cwd) still comes back,
-// just without nvim relaunching.
-post_command_discovery_hook "set -- $RESURRECT_COMMAND; case \"${1##*/}\" in nvim|vim|vi|view|nview) echo \"${SHELL:-/bin/bash}\" ;; *) echo \"$RESURRECT_COMMAND\" ;; esac"
+// Relaunch editor panes cleanly after a reboot. Zellij serializes a pane running
+// `nvim .` as an `edit=` pane and rebuilds its absolute path by concatenating the
+// cwd twice (e.g. .../Obs_Texera/Texera_Projects/Obs_Texera/.), so letting it
+// re-spawn nvim on that bogus directory leaves a zombie process and an orphaned
+// swap file. Instead, rewrite any discovered editor command to a bare
+// `env NVIM_RESTORE_LAYOUT=1 nvim`: zellij runs that as an ordinary command in
+// the pane's real (correctly restored) cwd, with no file path, so the doubled
+// `edit=` path is never touched. The NVIM_RESTORE_LAYOUT marker tells nvim this
+// is a reboot restore, so it rebuilds the Neo-tree + Claude layout on the
+// last-used account (see nvim/lua/restore_layout.lua). Everyday `nvim` launches
+// never see the marker and are unchanged.
+post_command_discovery_hook "set -- $RESURRECT_COMMAND; case \"${1##*/}\" in nvim|vim|vi|view|nview) echo \"env NVIM_RESTORE_LAYOUT=1 nvim\" ;; *) echo \"$RESURRECT_COMMAND\" ;; esac"
 
 // Number of async worker tasks to spawn per active client.
 //

@@ -1,12 +1,13 @@
 -- smart-splits.nvim: <C-h/j/k/l> navigates between nvim splits.
--- Multiplexer integration is off (Ghostty has no panes to cross into).
+-- Multiplexer integration is intentionally left off: we move between zellij
+-- panes with zellij's own keys, not <C-hjkl>. In smart-splits v2 "off" is simply
+-- leaving `mux.backend` unset (the default), so nothing needs to be configured.
+-- The old `multiplexer_integration = false` option was renamed to `mux.backend`
+-- and now warns on startup, so it has been removed.
 return {
   {
     "mrjones2014/smart-splits.nvim",
     lazy = false,
-    opts = {
-      multiplexer_integration = false,
-    },
     keys = {
       { "<C-h>", function() require("smart-splits").move_cursor_left() end, desc = "Move to split/pane left" },
       { "<C-j>", function() require("smart-splits").move_cursor_down() end, desc = "Move to split/pane below" },
