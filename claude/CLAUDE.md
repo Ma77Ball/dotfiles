@@ -15,5 +15,5 @@ When the user types `/leetcode-testdata`, invoke the Skill tool with `skill: "le
 When the user types `/mongoPR`, invoke the Skill tool with `skill: "mongoPR"` before doing anything else.
 
 # git-commit
-- **git-commit** (`~/.claude/skills/git-commit/SKILL.md`) - write a commit message that describes what the added/changed code is and how it works (not a changelog), with NO hard line wrapping (one line per paragraph/bullet, let soft-wrap handle it) and no AI attribution; copy it to the clipboard and commit. Trigger: `/git-commit` or asking to write a commit message / commit the changes.
+- **git-commit** (`~/.claude/skills/git-commit/SKILL.md`) - write a commit message that describes what the added/changed code is and how it works (not a changelog), with NO hard line wrapping (one line per paragraph/bullet, let soft-wrap handle it) and no AI attribution; copy it to the clipboard and commit with `git commit -F FILE`. Every commit Claude makes goes through this skill (a hook enforces the format and blocks `-m`); never `git push`. Trigger: `/git-commit` or asking to write a commit message / commit the changes.
 When the user types `/git-commit`, invoke the Skill tool with `skill: "git-commit"` before doing anything else.

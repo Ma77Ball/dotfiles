@@ -1,8 +1,11 @@
 {
   "permissions": {
-    "deny": [
-      "Bash(git push:*)",
-      "Bash(git commit *)"
+    "deny": [],
+    "allow": [
+      "Bash(git commit -F *)"
+    ],
+    "ask": [
+      "Bash(git push:*)"
     ]
   },
   "hooks": {
@@ -35,6 +38,16 @@
             "type": "command",
             "command": "python3 $HOME/.claude/hooks/block-git-in-scripts.py",
             "statusMessage": "Checking for git commit/push hidden in a script"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/enforce-git-commit-format.py",
+            "statusMessage": "Checking git commit follows the /git-commit format"
           }
         ]
       }

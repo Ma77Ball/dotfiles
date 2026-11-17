@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """PreToolUse (Bash) hook: block running git commit / git push indirectly via a script.
 
-Inline `git commit` / `git push` are already deny-listed in settings.json. This closes
-the bypass where the same commands are placed inside a shell script and run via
+Inline `git push` is deny-listed in settings.json, and inline `git commit` is only allowed
+in the /git-commit format (enforce-git-commit-format.py). This closes the bypass where the same commands are placed inside a shell script and run via
 `bash foo.sh` / `sh foo.sh` / `source foo.sh` / `./foo.sh`, which the inline deny rule
-does not match. Inline git commit/push are left untouched (they still hit the deny rule).
+and the format hook do not see. Inline git commit/push are left to those rules.
 
 Fails open: any parse/read error allows the command through so normal Bash use is never
 broken by this hook.
@@ -72,9 +72,8 @@ def main():
         if GIT_RE.search(content):
             reason = (
                 "Blocked: this runs git commit/git push indirectly through a script (%s). "
-                "Those commands are deny-listed inline and must not be routed through a script "
-                "to bypass that. Run the git command yourself so it hits the normal permission "
-                "prompt, or ask the user to run it." % os.path.basename(path)
+                "Commit inline with `git commit -F FILE` via the /git-commit skill; git push is "
+                "never allowed, so ask the user to push." % os.path.basename(path)
             )
             print(json.dumps({
                 "hookSpecificOutput": {

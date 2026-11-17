@@ -23,8 +23,13 @@
 -- restarts.
 local M = {}
 
--- Shared launch settings -- keep in sync with plugins/claude.lua's setup().
-local TERM_CMD = "claude --continue --permission-mode auto --model claude-opus-4-8"
+-- Shared launch settings (plugins/claude.lua's setup() reads M.TERM_CMD too).
+--
+-- bin/claude-launch resumes this folder's most recent session when one exists,
+-- otherwise starts a fresh chat (a bare `claude --continue` with no history
+-- exits immediately, which closed the split). It forwards the rest of the args.
+local TERM_CMD = vim.fn.stdpath("config") .. "/bin/claude-launch --permission-mode auto --model claude-opus-4-8"
+M.TERM_CMD = TERM_CMD
 local TERM_OPTS = { provider = "native", split_width_percentage = 0.30 }
 
 -- Where the account list is persisted (a JSON array of { name, dir }).

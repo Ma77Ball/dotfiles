@@ -1,0 +1,13 @@
+#!/bin/sh
+# Launch Claude Code for the nvim split (lua/claude_accounts.lua TERM_CMD).
+# Resume this folder's most recent session if one exists, else start a new chat:
+# a bare `claude --continue` with no history prints "No conversation found to
+# continue" and exits. Sessions live under
+# $CLAUDE_CONFIG_DIR/projects/<cwd with every non-alphanumeric char -> "-">, so
+# this follows whichever account is active. Being a file named claude-* also
+# keeps "claude" in the terminal buffer name, which plugins/claude.lua matches.
+d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
+if ls "$d"/*.jsonl >/dev/null 2>&1; then
+  exec claude --continue "$@"
+fi
+exec claude "$@"

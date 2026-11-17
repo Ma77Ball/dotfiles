@@ -5,10 +5,10 @@ return {
     "coder/claudecode.nvim",
     config = function()
       require("claudecode").setup({
-        -- start every session in `auto` permission mode with Opus 4.8 as the default model.
-        -- `--continue` resumes the most recent session in this dir on launch, so reopening
-        -- nvim reattaches instead of leaving a leftover "background session" prompt.
-        terminal_cmd = "claude --continue --permission-mode auto --model claude-opus-4-8", -- do not change unless you ask admin should use opus 4.8
+        -- start every session in `auto` permission mode with Opus 4.8 as the default model,
+        -- resuming this folder's last session if there is one, else a new chat.
+        -- Defined once in lua/claude_accounts.lua. Do not change the model unless you ask admin; should use opus 4.8.
+        terminal_cmd = require("claude_accounts").TERM_CMD,
         terminal = {
           provider = "native",
           split_width_percentage = 0.30,
@@ -31,6 +31,18 @@ return {
             vim.tbl_extend("force", opts, { desc = "Claude: exit prompt + hide" }))
           vim.keymap.set("t", "<C-x>", [[<C-\><C-n><C-w>p]],
             vim.tbl_extend("force", opts, { desc = "Claude: exit prompt + jump to code" }))
+
+          -- Entering the Claude window by any route (<C-h/j/k/l>, mouse, :wincmd)
+          -- lands in terminal mode, so j/k/h/l reach Claude's menus and prompt
+          -- instead of moving Neovim's cursor around the terminal buffer.
+          vim.api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, {
+            buffer = args.buf,
+            callback = function()
+              if vim.api.nvim_get_mode().mode ~= "t" then
+                vim.cmd("startinsert")
+              end
+            end,
+          })
         end,
       })
 
